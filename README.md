@@ -69,6 +69,15 @@ python src/launcher/rdp2exec.py -p 3390 user@hostname
 
 # Password via argument (or set RDP_PASSWORD)
 python src/launcher/rdp2exec.py -P 'secret' user@hostname powershell
+
+# Structured JSON result (single object) -- easiest for a tool layer to parse
+python src/launcher/rdp2exec.py --json user@hostname powershell Get-Service Spooler
+
+# Fan one command out across several targets, in parallel (JSON array result)
+python src/launcher/rdp2exec.py user@h1,user@h2,user@h3 cmd hostname
+
+# Unattended: read the password from a stored Windows Credential Manager entry
+python src/launcher/rdp2exec.py --credential-target my-rdp-box user@hostname cmd whoami
 ```
 
 `command...` triggers single-command mode (non-interactive, plain-pipe I/O). Omit it to get an interactive ConPTY-backed shell.
@@ -83,7 +92,51 @@ rdp2exec.exe user@host powershell Get-Service -Name Spooler
 
 - stdout and stderr arrive as separate byte streams (no ANSI/terminal control sequences mixed in, since single-command mode bypasses ConPTY).
 - The process's exit code is the remote command's exit code.
-- Wrap this invocation as a tool call (e.g. an MCP tool) that shells out to it, captures stdout/stderr, and returns them structured.
+- Wrap this invocation as a tool call that shells out to it, captures stdout/stderr, and returns them structured — or just use `--json` (below) and parse one object.
+
+#### `--json`: one structured object
+
+`--json` (single-command mode only) buffers the run and prints a single JSON object instead of streaming raw bytes:
+
+```json
+{"target": "user@host", "exit_code": 0, "stdout": "...", "stderr": "...", "error": null, "error_detail": null}
+```
+
+- `exit_code` is the remote command's exit code (the process also exits with it; when an `error` is set but no exit code was reported, the process exits non-zero).
+- `error` is `null` on success, or one of the stable slugs below; `error_detail` carries the original bridge text/number for humans.
+- Note: `--json` holds the full output in memory — intended for command results, not for arbitrarily large streams.
+
+#### Stable error vocabulary
+
+Rather than making an agent branch on raw bridge text or numeric codes, `error` uses a small closed set (`error_detail` preserves the original):
+
+| `error` slug | Meaning |
+|---|---|
+| `conpty_unavailable` | The target couldn't create a pseudo console (ConPTY missing/failed). |
+| `pipe_setup_failed` | A stdin/stdout/stderr pipe couldn't be created on the target. |
+| `process_setup_failed` | Process/attribute-list setup failed before spawning the command. |
+| `process_spawn_failed` | `CreateProcessW` for the command itself failed on the target. |
+| `remote_error` | Some other remote error (see `error_detail`). |
+| `connect_timeout` | The remote bridge never connected back within `--accept-timeout`. |
+| `channel_dropped` | The channel closed before an exit code was reported. |
+| `local_setup_error` | A local prerequisite (plugin DLL / bridge exe) was missing. |
+| `auth_required` | No password could be resolved for an unattended run. |
+
+#### Multiple targets
+
+Pass a comma-separated list as the target (`user@h1,user@h2`) or `--targets-file <path>` (one `user@host` per line, `#` comments allowed) to run the same command across many hosts in parallel. Multi-target mode requires a command (no interactive shell), runs up to `--max-parallel` (default 4) at once — each with its own isolated session — and always prints a **JSON array** of the per-target result objects (in input order). The process exits `0` only if every target succeeded.
+
+#### Credentials for unattended use
+
+Beyond `-P`/`RDP_PASSWORD`/interactive prompt, the password can come from the **Windows Credential Manager**:
+
+```powershell
+# Store once (uses the target username), then run unattended later with no -P:
+rdp2exec.exe --credential-target my-rdp-box --save-credential -P 'secret' user@host cmd whoami
+rdp2exec.exe --credential-target my-rdp-box user@host cmd whoami
+```
+
+Resolution order: `-P/--password` → `RDP_PASSWORD` → `--credential-target` (Credential Manager) → interactive prompt.
 
 ## Architecture
 

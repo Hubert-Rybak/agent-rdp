@@ -11,8 +11,10 @@ target host's local disk.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import ctypes
 import getpass
+import json
 import os
 import queue
 import shlex
@@ -24,6 +26,7 @@ import tempfile
 import textwrap
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 if os.name != "nt":
@@ -82,6 +85,85 @@ FRAME_ERROR = 0x84
 FRAME_OUTPUT_ERR = 0x85
 
 
+# ---------------------------------------------------------------------------
+# Stable error vocabulary (follow-up #7).
+#
+# The remote-side bridge reports failures two ways: free-text kError frames
+# (see src/windows/rdp2exec_bridge.cpp) and numeric process exit codes. Raw
+# text and numbers are awkward for an agent to branch on, so we fold them into
+# a small, closed set of slugs. `error_detail` always carries the original
+# text/number, so nothing is lost for a human debugging.
+# ---------------------------------------------------------------------------
+ERR_CONPTY_UNAVAILABLE = "conpty_unavailable"
+ERR_PIPE_SETUP_FAILED = "pipe_setup_failed"
+ERR_PROCESS_SETUP_FAILED = "process_setup_failed"
+ERR_PROCESS_SPAWN_FAILED = "process_spawn_failed"
+ERR_REMOTE = "remote_error"
+ERR_CONNECT_TIMEOUT = "connect_timeout"
+ERR_CHANNEL_DROPPED = "channel_dropped"
+ERR_LOCAL_SETUP = "local_setup_error"
+ERR_AUTH_REQUIRED = "auth_required"
+
+# Matched by substring against the bridge's kError text, most-specific first.
+_ERROR_TEXT_RULES: list[tuple[str, str]] = [
+    ("ConPTY API unavailable", ERR_CONPTY_UNAVAILABLE),
+    ("CreatePseudoConsole", ERR_CONPTY_UNAVAILABLE),
+    ("CreatePipe(", ERR_PIPE_SETUP_FAILED),
+    ("HeapAlloc(", ERR_PROCESS_SETUP_FAILED),
+    ("InitializeProcThreadAttributeList", ERR_PROCESS_SETUP_FAILED),
+    ("UpdateProcThreadAttribute", ERR_PROCESS_SETUP_FAILED),
+    ("CreateProcessW", ERR_PROCESS_SPAWN_FAILED),
+]
+
+
+def classify_error(text: str) -> str:
+    """Map a bridge kError text to a stable slug an agent can branch on.
+
+    Unknown text falls through to ERR_REMOTE (the raw text is preserved by the
+    caller in `error_detail`), so a future bridge message never crashes a
+    consumer -- it just reads as a generic remote error until we add a rule.
+    """
+    for needle, slug in _ERROR_TEXT_RULES:
+        if needle in text:
+            return slug
+    return ERR_REMOTE
+
+
+@dataclass
+class CommandResult:
+    """Structured outcome of a single-command run, shared by the JSON path
+    (#2), the error vocabulary (#7), and the multi-target aggregator (#6)."""
+
+    target: str = ""
+    exit_code: int = 0
+    stdout: str = ""
+    stderr: str = ""
+    error: str | None = None
+    error_detail: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        return self.error is not None or self.exit_code != 0
+
+    def process_exit_code(self) -> int:
+        """Exit code to return to the OS: the child's own code, but never 0
+        when an error was reported (setup failures send a kError with no exit
+        frame, leaving exit_code at its 0 default)."""
+        if self.error is not None and self.exit_code == 0:
+            return 1
+        return self.exit_code
+
+    def to_dict(self) -> dict:
+        return {
+            "target": self.target,
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "error": self.error,
+            "error_detail": self.error_detail,
+        }
+
+
 def debug_print(enabled: bool, *parts, **kwargs):
     if enabled:
         print(*parts, **kwargs)
@@ -105,13 +187,104 @@ def ensure_helper(helper_path: str) -> Path:
     return path
 
 
+# ---------------------------------------------------------------------------
+# Windows Credential Manager integration (follow-up #4).
+#
+# For unattended agent use, a password can be stored once in the Windows
+# Credential Manager (a generic credential keyed by an arbitrary target name)
+# and read back on later runs without ever passing -P or setting RDP_PASSWORD.
+# Implemented via ctypes against advapi32 (CredReadW/CredWriteW/CredFree); the
+# whole module stays importable on non-Windows (these functions just raise).
+# ---------------------------------------------------------------------------
+CRED_TYPE_GENERIC = 1
+CRED_PERSIST_LOCAL_MACHINE = 2
+
+
+class _CREDENTIAL(ctypes.Structure):
+    _fields_ = [
+        ("Flags", ctypes.c_uint32),
+        ("Type", ctypes.c_uint32),
+        ("TargetName", ctypes.c_wchar_p),
+        ("Comment", ctypes.c_wchar_p),
+        ("LastWritten", ctypes.c_uint64),
+        ("CredentialBlobSize", ctypes.c_uint32),
+        ("CredentialBlob", ctypes.POINTER(ctypes.c_byte)),
+        ("Persist", ctypes.c_uint32),
+        ("AttributeCount", ctypes.c_uint32),
+        ("Attributes", ctypes.c_void_p),
+        ("TargetAlias", ctypes.c_wchar_p),
+        ("UserName", ctypes.c_wchar_p),
+    ]
+
+
+def _require_windows(feature: str):
+    if os.name != "nt":
+        raise RuntimeError(f"{feature} requires Windows (Credential Manager is a Win32 feature).")
+
+
+def read_windows_credential(target_name: str) -> tuple[str | None, str]:
+    """Read a generic credential from Windows Credential Manager.
+
+    Returns (username_or_None, password). Raises RuntimeError if the target is
+    not found or on any Win32 error. The credential blob is stored as UTF-16LE
+    (the convention CredWriteW below uses)."""
+    _require_windows("--credential-target")
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    cred_ptr = ctypes.POINTER(_CREDENTIAL)()
+    ok = advapi32.CredReadW(ctypes.c_wchar_p(target_name), CRED_TYPE_GENERIC, 0,
+                            ctypes.byref(cred_ptr))
+    if not ok:
+        err = ctypes.get_last_error()
+        raise RuntimeError(f"CredReadW failed for target {target_name!r} (error {err}).")
+    try:
+        cred = cred_ptr.contents
+        size = cred.CredentialBlobSize
+        blob = ctypes.string_at(cred.CredentialBlob, size) if size else b""
+        password = blob.decode("utf-16-le", errors="replace")
+        username = cred.UserName or None
+        return username, password
+    finally:
+        advapi32.CredFree(cred_ptr)
+
+
+def write_windows_credential(target_name: str, username: str, password: str) -> None:
+    """Store a generic credential in Windows Credential Manager under
+    target_name, so later runs can resolve the password unattended."""
+    _require_windows("--save-credential")
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    blob = password.encode("utf-16-le")
+    blob_buf = (ctypes.c_byte * len(blob)).from_buffer_copy(blob) if blob else None
+    cred = _CREDENTIAL()
+    cred.Flags = 0
+    cred.Type = CRED_TYPE_GENERIC
+    cred.TargetName = target_name
+    cred.CredentialBlobSize = len(blob)
+    cred.CredentialBlob = ctypes.cast(blob_buf, ctypes.POINTER(ctypes.c_byte)) if blob_buf else None
+    cred.Persist = CRED_PERSIST_LOCAL_MACHINE
+    cred.UserName = username or None
+    ok = advapi32.CredWriteW(ctypes.byref(cred), 0)
+    if not ok:
+        err = ctypes.get_last_error()
+        raise RuntimeError(f"CredWriteW failed for target {target_name!r} (error {err}).")
+
+
 def resolve_password(args) -> str:
     if args.password:
         return args.password
+    if os.environ.get("RDP_PASSWORD"):
+        # Kept explicit even though argparse also defaults --password from this,
+        # so the precedence is obvious and stable regardless of how -P was set.
+        return os.environ["RDP_PASSWORD"]
+    if getattr(args, "credential_target", ""):
+        _, password = read_windows_credential(args.credential_target)
+        if password:
+            return password
     if sys.stdin.isatty() and sys.stderr.isatty():
         return getpass.getpass("RDP password: ")
     raise RuntimeError(
-        "RDP password is required. Provide -P/--password, set RDP_PASSWORD, or run from an interactive terminal for prompt input."
+        "RDP password is required. Provide -P/--password, set RDP_PASSWORD, "
+        "use --credential-target with a stored Windows credential, or run from "
+        "an interactive terminal for prompt input."
     )
 
 
@@ -286,7 +459,7 @@ def send_frame(conn: socket.socket, frame_type: int, payload: bytes = b""):
     conn.sendall(bytes([frame_type]) + struct.pack("<I", len(payload)) + payload)
 
 
-def build_wfreerdp_command(args, share_dir: Path):
+def build_wfreerdp_command(args, share_dir: Path, username: str, host: str):
     freerdp_log_level = "INFO" if args.debug else "OFF"
     cols, rows = get_terminal_size()
     _, alternate_shell = prepare_drive_share(
@@ -295,9 +468,9 @@ def build_wfreerdp_command(args, share_dir: Path):
     )
     cmd = [
         args.wfreerdp,
-        f"/v:{args.host}",
+        f"/v:{host}",
         f"/port:{args.port}",
-        f"/u:{args.username}",
+        f"/u:{username}",
         "/from-stdin:force",
         "/dvc:rdp2exec",
         f"/drive:{args.drive_name},{share_dir}",
@@ -482,12 +655,31 @@ def interactive_bridge(conn: socket.socket, debug: bool = False):
     return exit_code
 
 
-def command_bridge(conn: socket.socket, debug: bool = False):
+def run_command_session(conn: socket.socket, *, target: str = "", stream: bool = True,
+                        debug: bool = False) -> CommandResult:
+    """Drive a single non-interactive command over the channel and collect its
+    outcome into a CommandResult.
+
+    stdout/stderr bytes are always accumulated (so --json / multi-target can
+    return them). When `stream` is True (the default single-target, non-JSON
+    path) the bytes are also written live to the real stdout/stderr fds,
+    preserving the original streaming behavior exactly. The last kError text
+    is folded into a stable `error` slug via classify_error(); a channel that
+    closes before an exit frame is reported as ERR_CHANNEL_DROPPED.
+
+    Note: JSON/multi-target consumers hold the full output in memory. That is
+    fine for command results, but not intended for arbitrarily large streams.
+    """
     parser = FrameParser()
     cols, rows = get_terminal_size()
     conn.setblocking(True)
     conn.settimeout(0.2)
     send_frame(conn, FRAME_RESIZE, struct.pack("<HH", cols, rows))
+
+    stdout_buf = bytearray()
+    stderr_buf = bytearray()
+    result = CommandResult(target=target)
+    got_exit = False
 
     while True:
         try:
@@ -495,23 +687,40 @@ def command_bridge(conn: socket.socket, debug: bool = False):
         except socket.timeout:
             continue
         if not data:
-            return 0
+            break
         for frame_type, payload in parser.feed(data):
             if frame_type == FRAME_READY:
                 continue
             if frame_type == FRAME_OUTPUT:
-                os.write(sys.stdout.fileno(), payload)
+                stdout_buf.extend(payload)
+                if stream:
+                    os.write(sys.stdout.fileno(), payload)
             elif frame_type == FRAME_OUTPUT_ERR:
-                os.write(sys.stderr.fileno(), payload)
+                stderr_buf.extend(payload)
+                if stream:
+                    os.write(sys.stderr.fileno(), payload)
             elif frame_type == FRAME_ERROR:
                 text = payload.decode("utf-8", errors="replace")
+                result.error = classify_error(text)
+                result.error_detail = text
                 debug_print(debug, f"\n[rdp2exec] remote error: {text}", file=sys.stderr)
             elif frame_type == FRAME_EXIT:
-                code = struct.unpack("<I", payload[:4])[0] if len(payload) >= 4 else 0
-                debug_print(debug, f"\n[rdp2exec] remote exited with code {code}", file=sys.stderr)
-                return code
+                result.exit_code = struct.unpack("<I", payload[:4])[0] if len(payload) >= 4 else 0
+                got_exit = True
+                debug_print(debug, f"\n[rdp2exec] remote exited with code {result.exit_code}", file=sys.stderr)
+                break
             else:
                 debug_print(debug, f"\n[rdp2exec] unknown frame type {frame_type} len={len(payload)}", file=sys.stderr)
+        if got_exit:
+            break
+
+    result.stdout = stdout_buf.decode("utf-8", errors="replace")
+    result.stderr = stderr_buf.decode("utf-8", errors="replace")
+    if not got_exit and result.error is None:
+        # Channel closed before the bridge reported an exit code.
+        result.error = ERR_CHANNEL_DROPPED
+        result.error_detail = "channel closed before exit frame"
+    return result
 
 
 class ProcessLogger:
@@ -569,11 +778,16 @@ class nullcontext:
         return False
 
 
-def do_connect(args):
-    ensure_plugin(args.plugin_dir, args.plugin_name)
-    args.helper_exe_path = ensure_helper(args.helper_exe)
-    password = resolve_password(args)
+def do_connect(args, username: str, host: str, password: str, *, stream: bool = True):
+    """Run one RDP session against (username, host). Returns a CommandResult in
+    command mode or an int exit code in interactive mode.
 
+    Takes username/host/password explicitly (rather than reading args.username
+    etc.) so it is safe to invoke concurrently for multi-target fan-out (#6):
+    each call gets its own temp share dir, OS-assigned loopback port, and
+    wfreerdp subprocess -- nothing target-specific is shared through `args`.
+    """
+    target = f"{username}@{host}"
     with tempfile.TemporaryDirectory(prefix="rdp2exec-share-") if not args.share_dir else nullcontext(Path(args.share_dir)) as tmp:
         share_dir = Path(tmp) if isinstance(tmp, str) else tmp
 
@@ -581,8 +795,8 @@ def do_connect(args):
             env = dict(os.environ)
             env["RDP2EXEC_SOCKET"] = server.endpoint
 
-            cmd = build_wfreerdp_command(args, share_dir)
-            debug_print(args.debug, "[rdp2exec] launching:", " ".join(shlex.quote(str(x)) for x in cmd), file=sys.stderr)
+            cmd = build_wfreerdp_command(args, share_dir, username, host)
+            debug_print(args.debug, f"[rdp2exec] launching ({target}):", " ".join(shlex.quote(str(x)) for x in cmd), file=sys.stderr)
 
             popen_kwargs = {"env": env, "stdin": subprocess.PIPE}
             if args.debug:
@@ -603,10 +817,15 @@ def do_connect(args):
                     proc.stdin.write((password + "\n").encode("utf-8"))
                     proc.stdin.flush()
                     proc.stdin.close()
-                conn = server.accept(timeout=args.accept_timeout)
+                try:
+                    conn = server.accept(timeout=args.accept_timeout)
+                except socket.timeout as exc:
+                    raise TimeoutError(
+                        f"timed out waiting for the remote bridge to connect (target {target})"
+                    ) from exc
                 try:
                     if args.command:
-                        return command_bridge(conn, debug=args.debug)
+                        return run_command_session(conn, target=target, stream=stream, debug=args.debug)
                     return interactive_bridge(conn, debug=args.debug)
                 finally:
                     conn.close()
@@ -614,7 +833,7 @@ def do_connect(args):
                 if not args.debug and proc_logger is not None:
                     recent = [line for line in proc_logger.recent() if line.strip()]
                     if recent:
-                        print("[rdp2exec] wfreerdp stderr (most recent):", file=sys.stderr)
+                        print(f"[rdp2exec] wfreerdp stderr (most recent, {target}):", file=sys.stderr)
                         for line in recent[-20:]:
                             print(f"[wfreerdp] {line}", file=sys.stderr)
                 raise
@@ -629,9 +848,79 @@ def do_connect(args):
                     proc_logger.join(timeout=1.0)
 
 
+def parse_targets_spec(spec: str) -> list[tuple[str, str]]:
+    """Parse a --targets value into a list of (username, host).
+
+    Accepts a comma-separated list of user@host, or `@path` to read one
+    user@host per line from a file (blank lines and `#` comments ignored)."""
+    entries: list[str] = []
+    if spec.startswith("@"):
+        path = Path(spec[1:])
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                entries.append(line)
+    else:
+        entries = [part.strip() for part in spec.split(",") if part.strip()]
+    if not entries:
+        raise argparse.ArgumentTypeError("--targets did not yield any user@host entries")
+    return [parse_target(entry) for entry in entries]
+
+
+def _exception_to_result(target: str, exc: Exception) -> CommandResult:
+    """Fold a per-target failure into a CommandResult so one bad target never
+    sinks a multi-target batch."""
+    if isinstance(exc, TimeoutError):
+        slug = ERR_CONNECT_TIMEOUT
+    elif isinstance(exc, FileNotFoundError):
+        slug = ERR_LOCAL_SETUP
+    else:
+        slug = ERR_CHANNEL_DROPPED
+    return CommandResult(target=target, exit_code=1, error=slug, error_detail=str(exc))
+
+
+def run_multi_target(args, targets: list[tuple[str, str]], password: str) -> int:
+    """Fan a single command out across multiple targets in parallel (#6) and
+    emit a JSON array of per-target CommandResults. Exit 0 iff every target
+    exited 0, else 1."""
+    results: dict[int, CommandResult] = {}
+    max_workers = max(1, min(args.max_parallel, len(targets)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(do_connect, args, username, host, password, stream=False): (idx, f"{username}@{host}")
+            for idx, (username, host) in enumerate(targets)
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            idx, target = futures[fut]
+            try:
+                results[idx] = fut.result()
+            except Exception as exc:  # noqa: BLE001 - turned into a per-target result
+                results[idx] = _exception_to_result(target, exc)
+
+    ordered = [results[i] for i in range(len(targets))]
+    print(json.dumps([r.to_dict() for r in ordered]))
+    return 0 if not any(r.failed for r in ordered) else 1
+
+
+def run_single_target(args, username: str, host: str, password: str) -> int:
+    """Single-target run: stream output live (legacy behavior) unless --json,
+    in which case buffer and emit one JSON object. Interactive mode ignores
+    --json (guarded in main) and returns its own exit code."""
+    result = do_connect(args, username, host, password, stream=not args.json)
+    if not args.command:
+        # Interactive mode returned a raw exit code.
+        return int(result)
+    if args.json:
+        print(json.dumps(result.to_dict()))
+    return result.process_exit_code()
+
+
 def parser():
     p = argparse.ArgumentParser(description="Windows-to-Windows rdp2exec: run cmd/PowerShell on a remote Windows host over RDP")
-    p.add_argument("target", type=parse_target, help="Remote target in user@hostname format")
+    p.add_argument("target", nargs="?", default="",
+                   help="Remote target as user@hostname. Pass a comma-separated list "
+                        "(user@h1,user@h2) or use --targets-file to fan a command out across "
+                        "multiple targets in parallel.")
     p.add_argument("child", nargs="?", choices=["powershell", "cmd"], default="powershell")
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.add_argument("-p", "--port", type=int, default=int(os.environ.get("RDP_PORT", "3389")))
@@ -650,14 +939,73 @@ def parser():
     p.add_argument("--share-dir", default=os.environ.get("RDP2EXEC_SHARE_DIR", ""))
     p.add_argument("--enable-clipboard", action="store_true", default=bool(int(os.environ.get("RDP2EXEC_ENABLE_CLIPBOARD", "0"))))
     p.add_argument("--debug", action="store_true", default=bool(int(os.environ.get("RDP2EXEC_DEBUG", "0"))))
+    # Structured output (#2) / error vocabulary (#7)
+    p.add_argument("-j", "--json", action="store_true",
+                   default=bool(int(os.environ.get("RDP2EXEC_JSON", "0"))),
+                   help="Emit a single JSON object {target, exit_code, stdout, stderr, error, "
+                        "error_detail} instead of streaming raw output (single-command mode only). "
+                        "Multi-target mode always emits a JSON array.")
+    # Credential Manager (#4)
+    p.add_argument("--credential-target", default=os.environ.get("RDP2EXEC_CREDENTIAL_TARGET", ""),
+                   help="Read the RDP password from a Windows Credential Manager generic "
+                        "credential stored under this target name (unattended use).")
+    p.add_argument("--save-credential", action="store_true", default=False,
+                   help="Store the resolved password in Windows Credential Manager under "
+                        "--credential-target for later unattended runs, then continue.")
+    # Multi-target concurrency (#6)
+    p.add_argument("--targets-file", default=os.environ.get("RDP2EXEC_TARGETS_FILE", ""),
+                   help="Path to a file with one user@host per line (blank lines and # comments "
+                        "ignored); fans the command out across all of them in parallel.")
+    p.add_argument("--max-parallel", type=int, default=int(os.environ.get("RDP2EXEC_MAX_PARALLEL", "4")),
+                   help="Maximum number of targets to run concurrently in multi-target mode.")
     return p
+
+
+def resolve_targets(args, p) -> list[tuple[str, str]]:
+    """Resolve the requested target list from the positional / --targets-file,
+    erroring via the parser on conflicts or empty input."""
+    if args.targets_file and args.target:
+        p.error("provide targets either positionally or via --targets-file, not both")
+    try:
+        if args.targets_file:
+            return parse_targets_spec("@" + args.targets_file)
+        if args.target:
+            return parse_targets_spec(args.target)
+    except (argparse.ArgumentTypeError, OSError) as exc:
+        p.error(str(exc))
+    p.error("a target is required: user@hostname (or a comma-separated list / --targets-file)")
 
 
 def main():
     set_binary_mode()
-    args = parser().parse_args()
-    args.username, args.host = args.target
-    raise SystemExit(do_connect(args) or 0)
+    p = parser()
+    args = p.parse_args()
+
+    targets = resolve_targets(args, p)
+    multi = len(targets) > 1
+
+    if not args.command:
+        if multi:
+            p.error("multi-target mode requires a command (the interactive shell is single-target only)")
+        if args.json:
+            p.error("--json requires a command (interactive mode streams a live terminal)")
+    if multi and args.share_dir:
+        p.error("--share-dir cannot be combined with multiple targets (each target needs its own share dir)")
+    if args.save_credential and not args.credential_target:
+        p.error("--save-credential requires --credential-target NAME")
+
+    # Validate local components once, before any (possibly concurrent) connect.
+    ensure_plugin(args.plugin_dir, args.plugin_name)
+    args.helper_exe_path = ensure_helper(args.helper_exe)
+
+    password = resolve_password(args)
+    if args.save_credential:
+        write_windows_credential(args.credential_target, targets[0][0], password)
+
+    if multi:
+        raise SystemExit(run_multi_target(args, targets, password))
+    username, host = targets[0]
+    raise SystemExit(run_single_target(args, username, host, password) or 0)
 
 
 if __name__ == "__main__":

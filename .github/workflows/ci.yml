@@ -19,6 +19,12 @@ jobs:
       - name: Compile-check the launcher
         run: python -m py_compile src/launcher/rdp2exec.py
 
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Run launcher unit tests
+        run: python -m pytest tests/ -q
+
   windows-build:
     name: Windows build (plugin DLL + bridge EXE)
     runs-on: windows-latest
