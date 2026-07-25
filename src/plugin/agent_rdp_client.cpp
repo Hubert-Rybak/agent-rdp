@@ -1,7 +1,7 @@
-// FreeRDP Windows client plugin for rdp2exec.
+// FreeRDP Windows client plugin for agent-rdp.
 //
 // Loaded by wfreerdp.exe (FreeRDP's Windows client) as a Dynamic Virtual
-// Channel (DVC) handler. Bridges the "rdp2exec" DVC to a local TCP loopback
+// Channel (DVC) handler. Bridges the "agent-rdp" DVC to a local TCP loopback
 // socket that the Python launcher listens on -- the launcher is the process
 // that actually terminates the connection to the user's terminal/agent
 // caller, this plugin is just the byte pipe between the RDP session and it.
@@ -40,17 +40,17 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-#define TAG CHANNELS_TAG("rdp2exec.client")
+#define TAG CHANNELS_TAG("agent-rdp.client")
 
 namespace
 {
 
-  struct RDP2EXEC_PLUGIN
+  struct AGENT_RDP_PLUGIN
   {
     GENERIC_DYNVC_PLUGIN base;
   };
 
-  struct RDP2EXEC_CHANNEL_CALLBACK
+  struct AGENT_RDP_CHANNEL_CALLBACK
   {
     GENERIC_CHANNEL_CALLBACK generic;
     SOCKET sock;
@@ -70,7 +70,7 @@ namespace
 
   bool resolve_socket_endpoint(std::string &host, uint16_t &port)
   {
-    const char *env = std::getenv("RDP2EXEC_SOCKET");
+    const char *env = std::getenv("AGENT_RDP_SOCKET");
     if (!env || env[0] == '\0')
     {
       return false;
@@ -86,7 +86,7 @@ namespace
     host = value.substr(0, sep);
     if (host.empty())
     {
-      host = rdp2exec::kDefaultSocketHost;
+      host = agent_rdp::kDefaultSocketHost;
     }
 
     const std::string port_str = value.substr(sep + 1);
@@ -153,7 +153,7 @@ namespace
     return INVALID_SOCKET;
   }
 
-  void socket_reader_thread(RDP2EXEC_CHANNEL_CALLBACK *cb)
+  void socket_reader_thread(AGENT_RDP_CHANNEL_CALLBACK *cb)
   {
     std::vector<BYTE> buffer(8192);
 
@@ -186,9 +186,9 @@ namespace
     }
   }
 
-  UINT rdp2exec_on_data_received(IWTSVirtualChannelCallback *pChannelCallback, wStream *data)
+  UINT agent_rdp_on_data_received(IWTSVirtualChannelCallback *pChannelCallback, wStream *data)
   {
-    auto *cb = reinterpret_cast<RDP2EXEC_CHANNEL_CALLBACK *>(pChannelCallback);
+    auto *cb = reinterpret_cast<AGENT_RDP_CHANNEL_CALLBACK *>(pChannelCallback);
     if (!cb || cb->sock == INVALID_SOCKET || !data)
     {
       return CHANNEL_RC_OK;
@@ -218,9 +218,9 @@ namespace
     return CHANNEL_RC_OK;
   }
 
-  UINT rdp2exec_on_open(IWTSVirtualChannelCallback *pChannelCallback)
+  UINT agent_rdp_on_open(IWTSVirtualChannelCallback *pChannelCallback)
   {
-    auto *cb = reinterpret_cast<RDP2EXEC_CHANNEL_CALLBACK *>(pChannelCallback);
+    auto *cb = reinterpret_cast<AGENT_RDP_CHANNEL_CALLBACK *>(pChannelCallback);
     if (!cb)
     {
       return ERROR_INVALID_DATA;
@@ -230,7 +230,7 @@ namespace
     uint16_t port = 0;
     if (!resolve_socket_endpoint(host, port))
     {
-      WLog_ERR(TAG, "RDP2EXEC_SOCKET not set or malformed (expected host:port)");
+      WLog_ERR(TAG, "AGENT_RDP_SOCKET not set or malformed (expected host:port)");
       return ERROR_BAD_ARGUMENTS;
     }
 
@@ -254,13 +254,13 @@ namespace
     }
 
     cb->reader_started = 1;
-    WLog_INFO(TAG, "rdp2exec DVC opened; socket=%s:%u", host.c_str(), port);
+    WLog_INFO(TAG, "agent-rdp DVC opened; socket=%s:%u", host.c_str(), port);
     return CHANNEL_RC_OK;
   }
 
-  UINT rdp2exec_on_close(IWTSVirtualChannelCallback *pChannelCallback)
+  UINT agent_rdp_on_close(IWTSVirtualChannelCallback *pChannelCallback)
   {
-    auto *cb = reinterpret_cast<RDP2EXEC_CHANNEL_CALLBACK *>(pChannelCallback);
+    auto *cb = reinterpret_cast<AGENT_RDP_CHANNEL_CALLBACK *>(pChannelCallback);
     if (!cb)
     {
       return CHANNEL_RC_OK;
@@ -288,17 +288,17 @@ namespace
     return CHANNEL_RC_OK;
   }
 
-  static const IWTSVirtualChannelCallback rdp2exec_callbacks = {
-      rdp2exec_on_data_received,
-      rdp2exec_on_open,
-      rdp2exec_on_close,
+  static const IWTSVirtualChannelCallback agent_rdp_callbacks = {
+      agent_rdp_on_data_received,
+      agent_rdp_on_open,
+      agent_rdp_on_close,
   };
 
 } // namespace
 
 extern "C" __declspec(dllexport) UINT DVCPluginEntry(IDRDYNVC_ENTRY_POINTS *pEntryPoints)
 {
-  return freerdp_generic_DVCPluginEntry(pEntryPoints, TAG, rdp2exec::kChannelName, sizeof(RDP2EXEC_PLUGIN),
-                                        sizeof(RDP2EXEC_CHANNEL_CALLBACK), &rdp2exec_callbacks, nullptr,
+  return freerdp_generic_DVCPluginEntry(pEntryPoints, TAG, agent_rdp::kChannelName, sizeof(AGENT_RDP_PLUGIN),
+                                        sizeof(AGENT_RDP_CHANNEL_CALLBACK), &agent_rdp_callbacks, nullptr,
                                         nullptr);
 }

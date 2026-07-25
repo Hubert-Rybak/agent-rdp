@@ -17,7 +17,7 @@ jobs:
           python-version: "3.11"
 
       - name: Compile-check the launcher
-        run: python -m py_compile src/launcher/rdp2exec.py
+        run: python -m py_compile src/launcher/agent_rdp.py
 
       - name: Install test dependencies
         run: python -m pip install --upgrade pip pytest
@@ -43,13 +43,13 @@ jobs:
           restore-keys: |
             vcpkg-${{ runner.os }}-
 
-      - name: Build rdp2exec-client.dll + rdp2exec_bridge.exe
+      - name: Build agent-rdp-client.dll + agent-rdp-bridge.exe
         shell: pwsh
         run: ./scripts/build.ps1
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rdp2exec-windows-build
+          name: agent-rdp-windows-build
           path: artifacts/
           if-no-files-found: warn

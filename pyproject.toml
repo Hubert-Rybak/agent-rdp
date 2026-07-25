@@ -26,16 +26,16 @@ Homepage = "https://github.com/Hubert-Rybak/agent-rdp"
 Repository = "https://github.com/Hubert-Rybak/agent-rdp"
 
 [project.scripts]
-rdp2exec = "rdp2exec:main"
+agent-rdp = "agent_rdp:main"
 
-# The launcher is a single-file module. Ship src/launcher/rdp2exec.py as the
-# top-level importable module `rdp2exec` so the console script above resolves.
+# The launcher is a single-file module. Ship src/launcher/agent_rdp.py as the
+# top-level importable module `agent_rdp` so the console script above resolves.
 [tool.hatch.build.targets.wheel]
-force-include = { "src/launcher/rdp2exec.py" = "rdp2exec.py" }
+force-include = { "src/launcher/agent_rdp.py" = "agent_rdp.py" }
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/launcher/rdp2exec.py",
+    "src/launcher/agent_rdp.py",
     "README.md",
     "LICENSE",
     "pyproject.toml",

@@ -36,15 +36,15 @@ jobs:
         shell: pwsh
         run: ./scripts/build.ps1
 
-      # Freezes the launcher into a standalone rdp2exec.exe so the winget/zip
+      # Freezes the launcher into a standalone agent-rdp.exe so the winget/zip
       # package is self-contained (no separate Python install required).
-      # See _default_artifacts_dir() in src/launcher/rdp2exec.py: when frozen,
+      # See _default_artifacts_dir() in src/launcher/agent_rdp.py: when frozen,
       # it resolves its companion binaries relative to its own exe directory,
       # so everything below must land flat in the same folder.
       - name: Freeze launcher with PyInstaller
         shell: pwsh
         run: |
-          pyinstaller --onefile --name rdp2exec --distpath artifacts --workpath build/pyinstaller --specpath build src/launcher/rdp2exec.py
+          pyinstaller --onefile --name agent-rdp --distpath artifacts --workpath build/pyinstaller --specpath build src/launcher/agent_rdp.py
 
       - name: Package release zip
         id: package

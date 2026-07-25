@@ -16,26 +16,26 @@ Upstream `rdp2exec` is a Linux client (FreeRDP/`xfreerdp` + `xdotool`/X11) drivi
 | Local IPC (client ↔ plugin) | Unix domain socket | TCP loopback socket (Windows has no `AF_UNIX` here) |
 | Command output | Always via ConPTY (terminal control sequences mixed into output) | Interactive shell still uses ConPTY; single-command mode uses plain pipes with **separate stdout/stderr and exit code** — easy for a program to parse |
 
-The Windows target-side bridge (`rdp2exec_bridge.exe`) was already native Windows C++ in upstream and needed no port — only a new non-PTY execution mode was added to it.
+The Windows target-side bridge (`agent-rdp-bridge.exe`) was already native Windows C++ in upstream and needed no port — only a new non-PTY execution mode was added to it.
 
 ## Requirements
 
-- A Windows host to run the client (`rdp2exec`) from.
+- A Windows host to run the client (`agent-rdp`) from.
 - A Windows target with RDP enabled and a user account you can authenticate as.
 
 Building from source has its own toolchain requirements — see [Build](#build).
 
 ## Install
 
-This is not a pure-Python tool: the launcher drives three native binaries — `wfreerdp.exe` (FreeRDP's Windows client) plus this repo's own `rdp2exec-client.dll` and `rdp2exec_bridge.exe`, both compiled from C++. For a **self-contained install that just works**, use the [winget](#winget) package or the [pre-built release](#pre-built-release) zip — both bundle the launcher and all three binaries together. The [uv](#uv) path installs only the Python launcher, so it's for working from a source checkout where you've already built (or can point at) those binaries.
+This is not a pure-Python tool: the launcher drives three native binaries — `wfreerdp.exe` (FreeRDP's Windows client) plus this repo's own `agent-rdp-client.dll` and `agent-rdp-bridge.exe`, both compiled from C++. For a **self-contained install that just works**, use the [winget](#winget) package or the [pre-built release](#pre-built-release) zip — both bundle the launcher and all three binaries together. The [uv](#uv) path installs only the Python launcher, so it's for working from a source checkout where you've already built (or can point at) those binaries.
 
 ### Pre-built release
 
-Every tag push (`v*.*.*`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds `rdp2exec-client.dll` and `rdp2exec_bridge.exe`, bundles `wfreerdp.exe`, freezes the launcher into a standalone `rdp2exec.exe` (via PyInstaller — no separate Python install required), zips it all together, and publishes it to [Releases](https://github.com/Hubert-Rybak/agent-rdp/releases) with a `.sha256.txt` checksum. Download the zip for a release, extract it anywhere, and run `rdp2exec.exe` from that folder.
+Every tag push (`v*.*.*`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds `agent-rdp-client.dll` and `agent-rdp-bridge.exe`, bundles `wfreerdp.exe`, freezes the launcher into a standalone `agent-rdp.exe` (via PyInstaller — no separate Python install required), zips it all together, and publishes it to [Releases](https://github.com/Hubert-Rybak/agent-rdp/releases) with a `.sha256.txt` checksum. Download the zip for a release, extract it anywhere, and run `agent-rdp.exe` from that folder.
 
 ### winget
 
-A local winget manifest lives under [`winget/manifests/h/HubertRybak/AgentRdp/`](winget/manifests/h/HubertRybak/AgentRdp/), laid out in the same directory convention the [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) community repo uses (`InstallerType: zip` + `NestedInstallerType: portable`, so `winget` puts an `rdp2exec` command on your `PATH`). Install straight from it, without waiting on a public submission:
+A local winget manifest lives under [`winget/manifests/h/HubertRybak/AgentRdp/`](winget/manifests/h/HubertRybak/AgentRdp/), laid out in the same directory convention the [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) community repo uses (`InstallerType: zip` + `NestedInstallerType: portable`, so `winget` puts an `agent-rdp` command on your `PATH`). Install straight from it, without waiting on a public submission:
 
 ```powershell
 winget install --manifest winget/manifests/h/HubertRybak/AgentRdp/0.1.0
@@ -50,24 +50,24 @@ Notes:
 
 > **For a self-contained install, use [winget](#winget) or the [pre-built release](#pre-built-release) instead** — they bundle the native binaries. Reach for `uv` only when you're working from a source checkout and just want the Python launcher without managing a Python install yourself.
 
-The launcher is a single, **stdlib-only** Python script (3.10+, no third-party packages), and the repo ships a [`pyproject.toml`](pyproject.toml) that packages it as a console script named `rdp2exec`. [`uv`](https://github.com/astral-sh/uv) provisions a matching Python for you and runs or installs it in one step:
+The launcher is a single, **stdlib-only** Python script (3.10+, no third-party packages), and the repo ships a [`pyproject.toml`](pyproject.toml) that packages it as a console script named `agent-rdp`. [`uv`](https://github.com/astral-sh/uv) provisions a matching Python for you and runs or installs it in one step:
 
 ```powershell
 # Install uv (if you don't have it)
 winget install astral-sh.uv
 
-# Install the rdp2exec command onto your PATH (from a repo checkout)...
+# Install the agent-rdp command onto your PATH (from a repo checkout)...
 uv tool install .
 
 # ...or run it once, without installing (uvx builds it in a throwaway env)...
-uvx --from . rdp2exec user@host cmd whoami
+uvx --from . agent-rdp user@host cmd whoami
 
 # ...or run the script straight from source, no packaging at all
 # (uv reads the script's inline requires-python and fetches Python 3.10+):
-uv run src/launcher/rdp2exec.py user@host cmd whoami
+uv run src/launcher/agent_rdp.py user@host cmd whoami
 ```
 
-**Important — `uv` installs only the Python launcher, not the engine.** The tool still needs the three native binaries it drives: `rdp2exec-client.dll`, `rdp2exec_bridge.exe`, and `wfreerdp.exe`. `uv` cannot build these — they come from [`scripts/build.ps1`](#build) (into `artifacts/`) or from a [pre-built release](#pre-built-release). The launcher auto-discovers them in the repo's `artifacts/` directory when run from a source checkout; a `uv tool install`-ed command outside the tree needs them pointed to explicitly via `--plugin-dir` / `--helper-exe` / `--wfreerdp` (or the matching `RDP2EXEC_PLUGIN_DIR` / `RDP2EXEC_HELPER_EXE` / `WFREERDP` environment variables). Without them the launcher fails fast with `local_setup_error` before connecting.
+**Important — `uv` installs only the Python launcher, not the engine.** The tool still needs the three native binaries it drives: `agent-rdp-client.dll`, `agent-rdp-bridge.exe`, and `wfreerdp.exe`. `uv` cannot build these — they come from [`scripts/build.ps1`](#build) (into `artifacts/`) or from a [pre-built release](#pre-built-release). The launcher auto-discovers them in the repo's `artifacts/` directory when run from a source checkout; a `uv tool install`-ed command outside the tree needs them pointed to explicitly via `--plugin-dir` / `--helper-exe` / `--wfreerdp` (or the matching `AGENT_RDP_PLUGIN_DIR` / `AGENT_RDP_HELPER_EXE` / `WFREERDP` environment variables). Without them the launcher fails fast with `local_setup_error` before connecting.
 
 ### From source
 
@@ -75,34 +75,34 @@ See [Build](#build).
 
 ## Usage
 
-> These examples assume `rdp2exec` is on your `PATH` — which is what installing via [winget](#winget) or extracting a [Release zip](#pre-built-release) (and adding its folder to `PATH`) gives you. **Running from a source checkout instead?** Use `python src/launcher/rdp2exec.py` (or `uv run src/launcher/rdp2exec.py`) in place of `rdp2exec` in every example below — same arguments, same behavior.
+> These examples assume `agent-rdp` is on your `PATH` — which is what installing via [winget](#winget) or extracting a [Release zip](#pre-built-release) (and adding its folder to `PATH`) gives you. **Running from a source checkout instead?** Use `python src/launcher/agent_rdp.py` (or `uv run src/launcher/agent_rdp.py`) in place of `agent-rdp` in every example below — same arguments, same behavior.
 
 ```powershell
 # Login shell: PowerShell (default)
-rdp2exec user@hostname
+agent-rdp user@hostname
 
 # Login shell: CMD
-rdp2exec user@hostname cmd
+agent-rdp user@hostname cmd
 
 # Single command, clean separated stdout/stderr + exit code -- the mode an AI agent should use
-rdp2exec user@hostname powershell Get-Process
+agent-rdp user@hostname powershell Get-Process
 
-rdp2exec user@hostname cmd ipconfig /all
+agent-rdp user@hostname cmd ipconfig /all
 
 # Non-default port
-rdp2exec -p 3390 user@hostname
+agent-rdp -p 3390 user@hostname
 
 # Password via argument (or set RDP_PASSWORD)
-rdp2exec -P 'secret' user@hostname powershell
+agent-rdp -P 'secret' user@hostname powershell
 
 # Structured JSON result (single object) -- easiest for a tool layer to parse
-rdp2exec --json user@hostname powershell Get-Service Spooler
+agent-rdp --json user@hostname powershell Get-Service Spooler
 
 # Fan one command out across several targets, in parallel (JSON array result)
-rdp2exec user@h1,user@h2,user@h3 cmd hostname
+agent-rdp user@h1,user@h2,user@h3 cmd hostname
 
 # Unattended: read the password from a stored Windows Credential Manager entry
-rdp2exec --credential-target my-rdp-box user@hostname cmd whoami
+agent-rdp --credential-target my-rdp-box user@hostname cmd whoami
 ```
 
 `command...` triggers single-command mode (non-interactive, plain-pipe I/O). Omit it to get an interactive ConPTY-backed shell.
@@ -112,7 +112,7 @@ rdp2exec --credential-target my-rdp-box user@hostname cmd whoami
 For programmatic/agent use, invoke with a single command and no interactive shell:
 
 ```powershell
-rdp2exec user@host powershell Get-Service -Name Spooler
+agent-rdp user@host powershell Get-Service -Name Spooler
 ```
 
 - stdout and stderr arrive as separate byte streams (no ANSI/terminal control sequences mixed in, since single-command mode bypasses ConPTY).
@@ -157,8 +157,8 @@ Beyond `-P`/`RDP_PASSWORD`/interactive prompt, the password can come from the **
 
 ```powershell
 # Store once (uses the target username), then run unattended later with no -P:
-rdp2exec --credential-target my-rdp-box --save-credential -P 'secret' user@host cmd whoami
-rdp2exec --credential-target my-rdp-box user@host cmd whoami
+agent-rdp --credential-target my-rdp-box --save-credential -P 'secret' user@host cmd whoami
+agent-rdp --credential-target my-rdp-box user@host cmd whoami
 ```
 
 Resolution order: `-P/--password` → `RDP_PASSWORD` → `--credential-target` (Credential Manager) → interactive prompt.
@@ -167,23 +167,23 @@ Resolution order: `-P/--password` → `RDP_PASSWORD` → `--credential-target` (
 
 ```
 [Windows host running the AI agent]                    [Windows RDP target]
-  rdp2exec.py (launcher)                                  rdp2exec_bridge.exe
+  agent_rdp.py (launcher)                                  agent-rdp-bridge.exe
     - spawns wfreerdp.exe                                   (runs directly from
-    - /dvc:rdp2exec  /drive:r2e,<local temp dir>              \\tsclient\r2e\...,
+    - /dvc:agent-rdp  /drive:r2e,<local temp dir>              \\tsclient\r2e\...,
     - /shell:"cmd.exe /d /c ..."                               never copied to
     - /shell-dir:\\tsclient\r2e                                the target's disk)
     - TCP loopback <-> DVC bytes
         |
-        | DVC "rdp2exec" (framed protocol, src/common/protocol.hpp)
+        | DVC "agent-rdp" (framed protocol, src/common/protocol.hpp)
         v
-  rdp2exec-client.dll (FreeRDP plugin)
+  agent-rdp-client.dll (FreeRDP plugin)
     - Dynamic Virtual Channel handler
     - bridges DVC bytes <-> TCP loopback
 ```
 
-1. **Launcher** (`src/launcher/rdp2exec.py`) spawns `wfreerdp.exe` with device redirection (`/drive:`) pointing at a local temp directory containing the bridge executable (and, for single-command mode, a small generated `.ps1`/`.cmd` script), a Dynamic Virtual Channel (`/dvc:rdp2exec`), and an **Alternate Shell** command line (`/shell:`) that waits for the redirected drive to mount and then runs the bridge straight off it.
-2. **FreeRDP client plugin** (`src/plugin/rdp2exec_client.cpp`, built as `rdp2exec-client.dll`) opens the `rdp2exec` DVC and relays bytes to/from a TCP loopback socket the launcher listens on.
-3. **Windows bridge** (`src/windows/rdp2exec_bridge.cpp`) runs on the target, opens the DVC server-side (`WTSVirtualChannelOpenEx`), and either:
+1. **Launcher** (`src/launcher/agent_rdp.py`) spawns `wfreerdp.exe` with device redirection (`/drive:`) pointing at a local temp directory containing the bridge executable (and, for single-command mode, a small generated `.ps1`/`.cmd` script), a Dynamic Virtual Channel (`/dvc:agent-rdp`), and an **Alternate Shell** command line (`/shell:`) that waits for the redirected drive to mount and then runs the bridge straight off it.
+2. **FreeRDP client plugin** (`src/plugin/agent_rdp_client.cpp`, built as `agent-rdp-client.dll`) opens the `agent-rdp` DVC and relays bytes to/from a TCP loopback socket the launcher listens on.
+3. **Windows bridge** (`src/windows/agent_rdp_bridge.cpp`) runs on the target, opens the DVC server-side (`WTSVirtualChannelOpenEx`), and either:
    - creates a ConPTY-backed interactive shell (no `--command-file`), or
    - runs a single command through plain stdin/stdout/stderr pipes (`--command-file` given), streaming stdout and stderr back as **separate** frames plus a final exit-code frame — the mode used for agent/single-command invocations.
 
@@ -194,19 +194,19 @@ The only thing that ever touches the target host's local filesystem is whatever 
 - write any wrapper `.bat`/`.cmd` file to the target (the retry/bootstrap logic is passed inline via `/shell:`, not staged as a file),
 - leave the per-command PowerShell/CMD script on the target (it's likewise read straight from the redirected drive).
 
-Everything staged for a session lives in an ephemeral temp directory on the **client** (the machine running `rdp2exec.py`), for the lifetime of that RDP connection.
+Everything staged for a session lives in an ephemeral temp directory on the **client** (the machine running `agent_rdp.py`), for the lifetime of that RDP connection.
 
 ### End-to-end walkthrough
 
-What actually happens between typing `rdp2exec user@host cmd whoami` and getting output back:
+What actually happens between typing `agent-rdp user@host cmd whoami` and getting output back:
 
-1. **Resolve and validate (client).** The launcher parses the target(s), resolves the password (`-P` → `RDP_PASSWORD` → Credential Manager → interactive prompt), and confirms the two local binaries it needs exist: the FreeRDP plugin (`rdp2exec-client.dll`) and the bridge exe (`rdp2exec_bridge.exe`). Anything missing here fails fast as `local_setup_error` before a connection is attempted.
-2. **Open a loopback listener (client).** `LoopbackSocketServer` binds `127.0.0.1:0` — the OS picks a free port — and starts listening for exactly one connection. The chosen `host:port` is exported as the `RDP2EXEC_SOCKET` environment variable, which is how the plugin (below) will find its way back to this launcher instance. A random OS-assigned port per run is what makes concurrent multi-target sessions safe — no two collide.
+1. **Resolve and validate (client).** The launcher parses the target(s), resolves the password (`-P` → `RDP_PASSWORD` → Credential Manager → interactive prompt), and confirms the two local binaries it needs exist: the FreeRDP plugin (`agent-rdp-client.dll`) and the bridge exe (`agent-rdp-bridge.exe`). Anything missing here fails fast as `local_setup_error` before a connection is attempted.
+2. **Open a loopback listener (client).** `LoopbackSocketServer` binds `127.0.0.1:0` — the OS picks a free port — and starts listening for exactly one connection. The chosen `host:port` is exported as the `AGENT_RDP_SOCKET` environment variable, which is how the plugin (below) will find its way back to this launcher instance. A random OS-assigned port per run is what makes concurrent multi-target sessions safe — no two collide.
 3. **Stage the payload into a redirected drive (client).** The bridge exe is copied into an ephemeral client-side temp dir, and — in single-command mode — a small `.ps1` or `.cmd` script wrapping your command is written next to it. That temp dir is handed to `wfreerdp.exe` as a redirected drive (`/drive:r2e,<tempdir>`), so the target will see its contents at `\\tsclient\r2e\...`. These files live on the **client's** disk; the target only ever reads them across the RDP device-redirection channel.
-4. **Launch the RDP client with an Alternate Shell (client).** `wfreerdp.exe` is spawned with the target/credentials, the redirected drive, a Dynamic Virtual Channel registration (`/dvc:rdp2exec`), and an **Alternate Shell** command line (`/shell:` + `/shell-dir:`). The password is fed to `wfreerdp` over stdin (`/from-stdin:force`) rather than the command line. See [Bootstrapping without GUI automation](#bootstrapping-without-gui-automation) for what that shell command actually does.
-5. **Session logon runs the bridge (target).** On logon, RDP runs the Alternate Shell command instead of the normal desktop shell. That command polls for the redirected drive to mount, then executes `rdp2exec_bridge.exe` straight off `\\tsclient\r2e\` — no copy to local disk.
-6. **The bridge opens the channel from the inside (target).** The bridge calls `WTSVirtualChannelOpenEx(WTS_CURRENT_SESSION, "rdp2exec", …DYNAMIC)` to open the server end of the `rdp2exec` DVC from within the RDP session.
-7. **The plugin bridges DVC ↔ loopback (client).** Inside `wfreerdp.exe`, FreeRDP loads `rdp2exec-client.dll` as the handler for the `rdp2exec` DVC. When the channel opens, the plugin reads `RDP2EXEC_SOCKET`, connects a TCP socket back to the launcher's loopback listener (retrying while the connection is refused), and from then on shuttles raw bytes both ways: DVC → socket, and socket → DVC.
+4. **Launch the RDP client with an Alternate Shell (client).** `wfreerdp.exe` is spawned with the target/credentials, the redirected drive, a Dynamic Virtual Channel registration (`/dvc:agent-rdp`), and an **Alternate Shell** command line (`/shell:` + `/shell-dir:`). The password is fed to `wfreerdp` over stdin (`/from-stdin:force`) rather than the command line. See [Bootstrapping without GUI automation](#bootstrapping-without-gui-automation) for what that shell command actually does.
+5. **Session logon runs the bridge (target).** On logon, RDP runs the Alternate Shell command instead of the normal desktop shell. That command polls for the redirected drive to mount, then executes `agent-rdp-bridge.exe` straight off `\\tsclient\r2e\` — no copy to local disk.
+6. **The bridge opens the channel from the inside (target).** The bridge calls `WTSVirtualChannelOpenEx(WTS_CURRENT_SESSION, "agent-rdp", …DYNAMIC)` to open the server end of the `agent-rdp` DVC from within the RDP session.
+7. **The plugin bridges DVC ↔ loopback (client).** Inside `wfreerdp.exe`, FreeRDP loads `agent-rdp-client.dll` as the handler for the `agent-rdp` DVC. When the channel opens, the plugin reads `AGENT_RDP_SOCKET`, connects a TCP socket back to the launcher's loopback listener (retrying while the connection is refused), and from then on shuttles raw bytes both ways: DVC → socket, and socket → DVC.
 8. **The launcher accepts the connection (client).** `server.accept(timeout=--accept-timeout)` (default 60s) unblocks the moment the plugin connects. Now there is a continuous byte pipe: **launcher ⇄ loopback socket ⇄ plugin ⇄ DVC ⇄ bridge**. Everything above this point was setup; everything below is framed protocol over that pipe.
 9. **Run and stream (both ends).** The bridge spawns the child shell/command and relays its I/O back as [protocol frames](#the-framed-wire-protocol); the launcher decodes them, writing output to your stdout/stderr (or buffering it for `--json`). A final exit-code frame ends the run, and the launcher exits with that code.
 
@@ -253,7 +253,7 @@ That clean separation is exactly what makes single-command mode parseable, and i
 The one genuinely non-obvious mechanism is how the bridge gets launched on the target without any visible-desktop interaction. Upstream `rdp2exec` simulated `Win+R` and typed into the Run dialog over X11; this fork uses RDP's native **Alternate Shell** (a.k.a. Initial Program) feature instead. `build_alternate_shell` emits a command line like:
 
 ```bat
-cmd.exe /d /c "for /l %i in (1,1,20) do (if exist \\tsclient\r2e\rdp2exec_bridge.exe (\\tsclient\r2e\rdp2exec_bridge.exe --channel rdp2exec --child cmd --cols 120 --rows 40 --command-file \\tsclient\r2e\rdp2exec-command.cmd & exit /b) else (ping -n 2 127.0.0.1>nul))"
+cmd.exe /d /c "for /l %i in (1,1,20) do (if exist \\tsclient\r2e\agent-rdp-bridge.exe (\\tsclient\r2e\agent-rdp-bridge.exe --channel agent-rdp --child cmd --cols 120 --rows 40 --command-file \\tsclient\r2e\agent-rdp-command.cmd & exit /b) else (ping -n 2 127.0.0.1>nul))"
 ```
 
 - RDP runs this in place of the normal shell at logon — headless, no desktop automation, no keystroke injection.
@@ -268,15 +268,15 @@ cmd.exe /d /c "for /l %i in (1,1,20) do (if exist \\tsclient\r2e\rdp2exec_bridge
 Prerequisites:
 - A C++ toolchain: Visual Studio Build Tools ("Desktop development with C++") or mingw-w64, plus CMake and Ninja.
 - [vcpkg](https://github.com/microsoft/vcpkg) — `scripts/build.ps1` bootstraps a local copy automatically if `VCPKG_ROOT` isn't set.
-- Python 3.10+, to run `src/launcher/rdp2exec.py` from source (not needed if you're only using the packaged `rdp2exec.exe`).
+- Python 3.10+, to run `src/launcher/agent_rdp.py` from source (not needed if you're only using the packaged `agent-rdp.exe`).
 
 ```powershell
 ./scripts/build.ps1
 ```
 
-This bootstraps vcpkg, installs FreeRDP (`client` feature) via `vcpkg.json`, builds `rdp2exec-client.dll` and `rdp2exec_bridge.exe` via `CMakeLists.txt`, and stages everything into `./artifacts` alongside a copy of `wfreerdp.exe` and its runtime DLLs.
+This bootstraps vcpkg, installs FreeRDP (`client` feature) via `vcpkg.json`, builds `agent-rdp-client.dll` and `agent-rdp-bridge.exe` via `CMakeLists.txt`, and stages everything into `./artifacts` alongside a copy of `wfreerdp.exe` and its runtime DLLs.
 
-> **Note:** FreeRDP's Windows client loads Dynamic Virtual Channel plugins from an addin search path whose exact layout can vary by FreeRDP version/build. `build.ps1` stages `rdp2exec-client.dll` next to `wfreerdp.exe` in `./artifacts`, which covers the common "same directory as the client" convention — if your `wfreerdp.exe` doesn't pick it up from there, check your build's addin directory and copy the DLL there too.
+> **Note:** FreeRDP's Windows client loads Dynamic Virtual Channel plugins from an addin search path whose exact layout can vary by FreeRDP version/build. `build.ps1` stages `agent-rdp-client.dll` next to `wfreerdp.exe` in `./artifacts`, which covers the common "same directory as the client" convention — if your `wfreerdp.exe` doesn't pick it up from there, check your build's addin directory and copy the DLL there too.
 
 ## Security / detection note
 

@@ -3,7 +3,7 @@ text falls through to the generic remote_error catch-all."""
 import pytest
 
 
-# The exact kError strings emitted by src/windows/rdp2exec_bridge.cpp, paired
+# The exact kError strings emitted by src/windows/agent_rdp_bridge.cpp, paired
 # with the slug an agent should see. Keep this in sync with the bridge.
 BRIDGE_MESSAGES = {
     "ConPTY API unavailable on this Windows build/session": "conpty_unavailable",

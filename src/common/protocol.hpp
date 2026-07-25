@@ -2,13 +2,13 @@
 
 #include <cstdint>
 
-namespace rdp2exec
+namespace agent_rdp
 {
 
-    inline constexpr const char *kChannelName = "rdp2exec";
+    inline constexpr const char *kChannelName = "agent-rdp";
 
     // Default client-side IPC endpoint (TCP loopback). The launcher always
-    // overrides this via the RDP2EXEC_SOCKET env var ("host:port"), but a
+    // overrides this via the AGENT_RDP_SOCKET env var ("host:port"), but a
     // default keeps the plugin usable stand-alone during development.
     inline constexpr const char *kDefaultSocketHost = "127.0.0.1";
     inline constexpr uint16_t kDefaultSocketPort = 0; // 0 = must be supplied by launcher
@@ -30,4 +30,4 @@ namespace rdp2exec
         inline constexpr uint8_t kOutputErr = 0x85;
     } // namespace frame
 
-} // namespace rdp2exec
+} // namespace agent_rdp

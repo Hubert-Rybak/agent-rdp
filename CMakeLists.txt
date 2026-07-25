@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
-project(rdp2exec LANGUAGES CXX)
+project(agent_rdp LANGUAGES CXX)
 
 if(NOT WIN32)
-  message(FATAL_ERROR "rdp2exec (Windows-to-Windows edition) only builds for Windows targets. "
+  message(FATAL_ERROR "agent-rdp (Windows-to-Windows edition) only builds for Windows targets. "
                        "Configure with a Windows toolchain, e.g. via vcpkg's mingw-x64-windows "
                        "or an MSVC generator.")
 endif()
@@ -17,34 +17,35 @@ pkg_check_modules(FREERDP_CLIENT REQUIRED IMPORTED_TARGET freerdp-client3)
 pkg_check_modules(WINPR REQUIRED IMPORTED_TARGET winpr3)
 
 # --- Client-side FreeRDP DVC plugin (runs on the Windows agent/orchestrator host) ---
-add_library(rdp2exec_client SHARED
-  src/plugin/rdp2exec_client.cpp
+add_library(agent_rdp_client SHARED
+  src/plugin/agent_rdp_client.cpp
 )
-target_include_directories(rdp2exec_client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(rdp2exec_client PRIVATE
+target_include_directories(agent_rdp_client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(agent_rdp_client PRIVATE
   PkgConfig::FREERDP
   PkgConfig::FREERDP_CLIENT
   PkgConfig::WINPR
   ws2_32
 )
-set_target_properties(rdp2exec_client PROPERTIES
-  OUTPUT_NAME "rdp2exec-client"
+set_target_properties(agent_rdp_client PROPERTIES
+  OUTPUT_NAME "agent-rdp-client"
   PREFIX ""
 )
 
 # --- Windows target-side bridge (runs on the remote RDP host, off the redirected drive) ---
-add_executable(rdp2exec_bridge
-  src/windows/rdp2exec_bridge.cpp
+add_executable(agent_rdp_bridge
+  src/windows/agent_rdp_bridge.cpp
 )
-target_include_directories(rdp2exec_bridge PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_compile_definitions(rdp2exec_bridge PRIVATE _WIN32_WINNT=0x0A00 UNICODE _UNICODE)
+target_include_directories(agent_rdp_bridge PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(agent_rdp_bridge PRIVATE _WIN32_WINNT=0x0A00 UNICODE _UNICODE)
+set_target_properties(agent_rdp_bridge PROPERTIES OUTPUT_NAME "agent-rdp-bridge")
 # /municode via the "wmain" entry point: request a Unicode CRT entry point.
 if(MSVC)
-  set_target_properties(rdp2exec_bridge PROPERTIES LINK_FLAGS "/ENTRY:wmainCRTStartup")
+  set_target_properties(agent_rdp_bridge PROPERTIES LINK_FLAGS "/ENTRY:wmainCRTStartup")
 else()
-  target_link_options(rdp2exec_bridge PRIVATE -municode)
+  target_link_options(agent_rdp_bridge PRIVATE -municode)
 endif()
-target_link_libraries(rdp2exec_bridge PRIVATE
+target_link_libraries(agent_rdp_bridge PRIVATE
   wtsapi32
   user32
   advapi32
@@ -54,7 +55,7 @@ target_link_libraries(rdp2exec_bridge PRIVATE
 # On Windows a SHARED library's loadable output (the .dll) is a RUNTIME
 # artifact, not LIBRARY (LIBRARY only applies to Unix .so); ARCHIVE picks up
 # the accompanying .lib import library.
-install(TARGETS rdp2exec_client rdp2exec_bridge
+install(TARGETS agent_rdp_client agent_rdp_bridge
   RUNTIME DESTINATION artifacts
   ARCHIVE DESTINATION artifacts
 )

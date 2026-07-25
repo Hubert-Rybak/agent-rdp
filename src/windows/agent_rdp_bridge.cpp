@@ -143,7 +143,7 @@ struct FrameParser
 
 struct Args
 {
-  std::string channel = "rdp2exec";
+  std::string channel = "agent-rdp";
   std::wstring child = L"powershell";
   std::wstring command_file;
   short cols = 120;
@@ -224,7 +224,7 @@ static std::wstring build_command_line(const Args &args)
 
 static constexpr size_t kChannelPduLength = 8;
 
-// Reads WTS virtual channel PDUs and yields decoded rdp2exec frames via `fn`.
+// Reads WTS virtual channel PDUs and yields decoded agent-rdp frames via `fn`.
 // Shared by both the ConPTY interactive path and the pipe-mode command path.
 template <typename Fn>
 static bool pump_channel_once(HANDLE channel, std::vector<uint8_t> &rx, FrameParser &parser, Fn fn, bool &channel_gone)
@@ -266,7 +266,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
   ConptyApi conpty{};
   if (!load_conpty_api(conpty))
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError,
+    send_text(channel, write_guard, agent_rdp::frame::kError,
               "ConPTY API unavailable on this Windows build/session");
     return 20;
   }
@@ -279,12 +279,12 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
   HANDLE pty_out_read = nullptr, pty_out_write = nullptr;
   if (!CreatePipe(&pty_in_read, &pty_in_write, &sa, 0))
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError, "CreatePipe(input) failed");
+    send_text(channel, write_guard, agent_rdp::frame::kError, "CreatePipe(input) failed");
     return 21;
   }
   if (!CreatePipe(&pty_out_read, &pty_out_write, &sa, 0))
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError, "CreatePipe(output) failed");
+    send_text(channel, write_guard, agent_rdp::frame::kError, "CreatePipe(output) failed");
     CloseHandle(pty_in_read);
     CloseHandle(pty_in_write);
     return 22;
@@ -297,7 +297,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
   CloseHandle(pty_out_write);
   if (FAILED(hr))
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError, "CreatePseudoConsole failed");
+    send_text(channel, write_guard, agent_rdp::frame::kError, "CreatePseudoConsole failed");
     CloseHandle(pty_in_write);
     CloseHandle(pty_out_read);
     return 23;
@@ -308,7 +308,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
   auto *attr_list = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(HeapAlloc(GetProcessHeap(), 0, attr_size));
   if (!attr_list)
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError, "HeapAlloc(attr_list) failed");
+    send_text(channel, write_guard, agent_rdp::frame::kError, "HeapAlloc(attr_list) failed");
     conpty.close(hpc);
     CloseHandle(pty_in_write);
     CloseHandle(pty_out_read);
@@ -316,7 +316,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
   }
   if (!InitializeProcThreadAttributeList(attr_list, 1, 0, &attr_size))
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError, "InitializeProcThreadAttributeList failed");
+    send_text(channel, write_guard, agent_rdp::frame::kError, "InitializeProcThreadAttributeList failed");
     HeapFree(GetProcessHeap(), 0, attr_list);
     conpty.close(hpc);
     CloseHandle(pty_in_write);
@@ -326,7 +326,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
   if (!UpdateProcThreadAttribute(attr_list, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hpc, sizeof(hpc), nullptr,
                                  nullptr))
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError, "UpdateProcThreadAttribute(PSEUDOCONSOLE) failed");
+    send_text(channel, write_guard, agent_rdp::frame::kError, "UpdateProcThreadAttribute(PSEUDOCONSOLE) failed");
     DeleteProcThreadAttributeList(attr_list);
     HeapFree(GetProcessHeap(), 0, attr_list);
     conpty.close(hpc);
@@ -348,7 +348,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
                       EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
                       &si.StartupInfo, &pi))
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError, "CreateProcessW child failed");
+    send_text(channel, write_guard, agent_rdp::frame::kError, "CreateProcessW child failed");
     DeleteProcThreadAttributeList(attr_list);
     HeapFree(GetProcessHeap(), 0, attr_list);
     conpty.close(hpc);
@@ -358,7 +358,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
   }
 
   CloseHandle(pi.hThread);
-  send_frame(channel, write_guard, rdp2exec::frame::kReady, nullptr, 0);
+  send_frame(channel, write_guard, agent_rdp::frame::kReady, nullptr, 0);
 
   std::atomic<bool> running{true};
   std::thread out_thread([&]()
@@ -372,7 +372,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
       if (n == 0) {
         break;
       }
-      if (!send_frame(channel, write_guard, rdp2exec::frame::kOutput, out.data(), static_cast<uint32_t>(n))) {
+      if (!send_frame(channel, write_guard, agent_rdp::frame::kOutput, out.data(), static_cast<uint32_t>(n))) {
         running.store(false);
         TerminateProcess(pi.hProcess, 0);
         break;
@@ -392,7 +392,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
     bool channel_gone = false;
     pump_channel_once(channel, rx, parser, [&](uint8_t type, const std::vector<uint8_t> &payload)
                 {
-      if (type == rdp2exec::frame::kInput) {
+      if (type == agent_rdp::frame::kInput) {
         if (!payload.empty()) {
           DWORD written = 0;
           if (!WriteFile(pty_in_write, payload.data(), static_cast<DWORD>(payload.size()), &written, nullptr)) {
@@ -400,7 +400,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
             TerminateProcess(pi.hProcess, 0);
           }
         }
-      } else if (type == rdp2exec::frame::kResize) {
+      } else if (type == agent_rdp::frame::kResize) {
         if (payload.size() >= 4) {
           const short cols = static_cast<short>(payload[0] | (payload[1] << 8));
           const short rows = static_cast<short>(payload[2] | (payload[3] << 8));
@@ -408,7 +408,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
                          static_cast<SHORT>(rows > 0 ? rows : 40)};
           conpty.resize(hpc, new_size);
         }
-      } else if (type == rdp2exec::frame::kClose) {
+      } else if (type == agent_rdp::frame::kClose) {
         running.store(false);
         TerminateProcess(pi.hProcess, 0);
       } }, channel_gone);
@@ -430,7 +430,7 @@ static int run_conpty_mode(HANDLE channel, WriteGuard &write_guard, const Args &
   WaitForSingleObject(pi.hProcess, 3000);
   DWORD exit_code = 0;
   GetExitCodeProcess(pi.hProcess, &exit_code);
-  send_frame(channel, write_guard, rdp2exec::frame::kExit, &exit_code, sizeof(exit_code));
+  send_frame(channel, write_guard, agent_rdp::frame::kExit, &exit_code, sizeof(exit_code));
 
   if (out_thread.joinable())
   {
@@ -484,19 +484,19 @@ static int run_pipe_mode(HANDLE channel, WriteGuard &write_guard, const Args &ar
   PipeEnds stdin_pipe, stdout_pipe, stderr_pipe;
   if (!create_inheritable_pipe(stdin_pipe, /*child_is_reader=*/true))
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError, "CreatePipe(stdin) failed");
+    send_text(channel, write_guard, agent_rdp::frame::kError, "CreatePipe(stdin) failed");
     return 30;
   }
   if (!create_inheritable_pipe(stdout_pipe, /*child_is_reader=*/false))
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError, "CreatePipe(stdout) failed");
+    send_text(channel, write_guard, agent_rdp::frame::kError, "CreatePipe(stdout) failed");
     close_if_valid(stdin_pipe.read);
     close_if_valid(stdin_pipe.write);
     return 31;
   }
   if (!create_inheritable_pipe(stderr_pipe, /*child_is_reader=*/false))
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError, "CreatePipe(stderr) failed");
+    send_text(channel, write_guard, agent_rdp::frame::kError, "CreatePipe(stderr) failed");
     close_if_valid(stdin_pipe.read);
     close_if_valid(stdin_pipe.write);
     close_if_valid(stdout_pipe.read);
@@ -526,7 +526,7 @@ static int run_pipe_mode(HANDLE channel, WriteGuard &write_guard, const Args &ar
 
   if (!created)
   {
-    send_text(channel, write_guard, rdp2exec::frame::kError, "CreateProcessW child failed");
+    send_text(channel, write_guard, agent_rdp::frame::kError, "CreateProcessW child failed");
     close_if_valid(stdin_pipe.write);
     close_if_valid(stdout_pipe.read);
     close_if_valid(stderr_pipe.read);
@@ -534,7 +534,7 @@ static int run_pipe_mode(HANDLE channel, WriteGuard &write_guard, const Args &ar
   }
 
   CloseHandle(pi.hThread);
-  send_frame(channel, write_guard, rdp2exec::frame::kReady, nullptr, 0);
+  send_frame(channel, write_guard, agent_rdp::frame::kReady, nullptr, 0);
 
   std::atomic<bool> running{true};
 
@@ -557,8 +557,8 @@ static int run_pipe_mode(HANDLE channel, WriteGuard &write_guard, const Args &ar
     }
   };
 
-  std::thread stdout_thread(reader, stdout_pipe.read, rdp2exec::frame::kOutput);
-  std::thread stderr_thread(reader, stderr_pipe.read, rdp2exec::frame::kOutputErr);
+  std::thread stdout_thread(reader, stdout_pipe.read, agent_rdp::frame::kOutput);
+  std::thread stderr_thread(reader, stderr_pipe.read, agent_rdp::frame::kOutputErr);
 
   FrameParser parser;
   std::vector<uint8_t> rx(8192);
@@ -572,14 +572,14 @@ static int run_pipe_mode(HANDLE channel, WriteGuard &write_guard, const Args &ar
     bool channel_gone = false;
     pump_channel_once(channel, rx, parser, [&](uint8_t type, const std::vector<uint8_t> &payload)
                 {
-      if (type == rdp2exec::frame::kInput) {
+      if (type == agent_rdp::frame::kInput) {
         if (!payload.empty() && stdin_pipe.write) {
           DWORD written = 0;
           if (!WriteFile(stdin_pipe.write, payload.data(), static_cast<DWORD>(payload.size()), &written, nullptr)) {
             close_if_valid(stdin_pipe.write);
           }
         }
-      } else if (type == rdp2exec::frame::kClose) {
+      } else if (type == agent_rdp::frame::kClose) {
         running.store(false);
         TerminateProcess(pi.hProcess, 0);
       }
@@ -611,7 +611,7 @@ static int run_pipe_mode(HANDLE channel, WriteGuard &write_guard, const Args &ar
   close_if_valid(stdout_pipe.read);
   close_if_valid(stderr_pipe.read);
 
-  send_frame(channel, write_guard, rdp2exec::frame::kExit, &exit_code, sizeof(exit_code));
+  send_frame(channel, write_guard, agent_rdp::frame::kExit, &exit_code, sizeof(exit_code));
 
   CloseHandle(pi.hProcess);
   return static_cast<int>(exit_code);
