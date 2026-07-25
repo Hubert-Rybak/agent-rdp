@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-_LAUNCHER = Path(__file__).resolve().parents[1] / "src" / "launcher" / "rdp2exec.py"
+_LAUNCHER = Path(__file__).resolve().parents[1] / "src" / "launcher" / "agent_rdp.py"
 
 
 def _load_module():
-    spec = importlib.util.spec_from_file_location("rdp2exec_launcher", _LAUNCHER)
+    spec = importlib.util.spec_from_file_location("agent_rdp_launcher", _LAUNCHER)
     module = importlib.util.module_from_spec(spec)
     # Register before exec so dataclass string-annotation resolution can find it.
     sys.modules[spec.name] = module

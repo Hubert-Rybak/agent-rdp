@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Windows-to-Windows launcher: drives a Windows RDP target's cmd/PowerShell
-from a Windows client host, via wfreerdp.exe + the rdp2exec DVC plugin.
+from a Windows client host, via wfreerdp.exe + the agent-rdp DVC plugin.
 
 Bootstraps execution using RDP's native Alternate Shell (Initial Program)
 feature -- no GUI automation, no visible-desktop keystroke injection. The
@@ -8,6 +8,10 @@ remote-side bridge executable is run directly off the FreeRDP-redirected
 client drive (a \\\\tsclient\\... UNC path); it is never copied onto the
 target host's local disk.
 """
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
 from __future__ import annotations
 
 import argparse
@@ -30,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 if os.name != "nt":
-    print("rdp2exec: this launcher targets Windows clients only.", file=sys.stderr)
+    print("agent-rdp: this launcher targets Windows clients only.", file=sys.stderr)
 else:
     import msvcrt
 
@@ -50,14 +54,14 @@ def set_binary_mode():
             pass
 
 def _default_artifacts_dir() -> Path:
-    """Where rdp2exec-client.dll / rdp2exec_bridge.exe / wfreerdp.exe are
+    """Where agent-rdp-client.dll / agent-rdp-bridge.exe / wfreerdp.exe are
     expected to live by default.
 
     In a source checkout that's <repo>/artifacts (populated by
     scripts/build.ps1). When frozen into a standalone exe (PyInstaller, as
     used for the winget package), __file__ no longer reflects the source
     tree -- sys.executable's own directory is the install directory, and
-    the winget zip lays everything out flat alongside rdp2exec.exe there.
+    the winget zip lays everything out flat alongside agent-rdp.exe there.
     """
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -65,15 +69,15 @@ def _default_artifacts_dir() -> Path:
 
 
 DEFAULT_ARTIFACTS_DIR = _default_artifacts_dir()
-DEFAULT_PLUGIN_DIR = os.environ.get("RDP2EXEC_PLUGIN_DIR", str(DEFAULT_ARTIFACTS_DIR))
-DEFAULT_PLUGIN_NAME = "rdp2exec-client.dll"
+DEFAULT_PLUGIN_DIR = os.environ.get("AGENT_RDP_PLUGIN_DIR", str(DEFAULT_ARTIFACTS_DIR))
+DEFAULT_PLUGIN_NAME = "agent-rdp-client.dll"
 # Prefer a wfreerdp.exe staged alongside our own binaries (source-tree
 # artifacts/, or the flat winget/PyInstaller install layout) over relying on
 # PATH, but still fall back to PATH resolution if one isn't found there.
 _bundled_wfreerdp = DEFAULT_ARTIFACTS_DIR / "wfreerdp.exe"
 DEFAULT_WFREERDP = str(_bundled_wfreerdp) if _bundled_wfreerdp.exists() else "wfreerdp.exe"
 DEFAULT_DRIVE_NAME = "r2e"
-DEFAULT_HELPER_EXE = str(DEFAULT_ARTIFACTS_DIR / "rdp2exec_bridge.exe")
+DEFAULT_HELPER_EXE = str(DEFAULT_ARTIFACTS_DIR / "agent-rdp-bridge.exe")
 
 FRAME_INPUT = 0x01
 FRAME_RESIZE = 0x02
@@ -89,7 +93,7 @@ FRAME_OUTPUT_ERR = 0x85
 # Stable error vocabulary (follow-up #7).
 #
 # The remote-side bridge reports failures two ways: free-text kError frames
-# (see src/windows/rdp2exec_bridge.cpp) and numeric process exit codes. Raw
+# (see src/windows/agent_rdp_bridge.cpp) and numeric process exit codes. Raw
 # text and numbers are awkward for an agent to branch on, so we fold them into
 # a small, closed set of slugs. `error_detail` always carries the original
 # text/number, so nothing is lost for a human debugging.
@@ -334,7 +338,7 @@ def build_command_script(child: str, command: list[str]) -> tuple[str, str]:
             exit 0
             """
         ).strip() + "\r\n"
-        return "rdp2exec-command.ps1", script
+        return "agent-rdp-command.ps1", script
 
     if child == "cmd":
         invocation = " ".join(quote_cmd_token(part) for part in command)
@@ -346,7 +350,7 @@ def build_command_script(child: str, command: list[str]) -> tuple[str, str]:
             exit /b %ERRORLEVEL%
             """
         ).strip() + "\r\n"
-        return "rdp2exec-command.cmd", script
+        return "agent-rdp-command.cmd", script
 
     raise ValueError("child must be powershell or cmd")
 
@@ -366,8 +370,8 @@ def build_alternate_shell(drive_name: str, child: str, cols: int, rows: int, com
     if child not in {"powershell", "cmd"}:
         raise ValueError("child must be powershell or cmd")
 
-    exe_unc = rf"\\tsclient\{drive_name}\rdp2exec_bridge.exe"
-    bridge_args = f"--channel rdp2exec --child {child} --cols {cols} --rows {rows}"
+    exe_unc = rf"\\tsclient\{drive_name}\agent-rdp-bridge.exe"
+    bridge_args = f"--channel agent-rdp --child {child} --cols {cols} --rows {rows}"
     if command_file:
         bridge_args += f" --command-file {command_file}"
 
@@ -389,7 +393,7 @@ def prepare_drive_share(base_dir: Path, helper_exe: Path, child: str, drive_name
     virtual \\\\tsclient\\... drive for the lifetime of the RDP session.
     """
     base_dir.mkdir(parents=True, exist_ok=True)
-    staged_exe = base_dir / "rdp2exec_bridge.exe"
+    staged_exe = base_dir / "agent-rdp-bridge.exe"
     staged_exe.write_bytes(helper_exe.read_bytes())
 
     command_file = ""
@@ -472,7 +476,7 @@ def build_wfreerdp_command(args, share_dir: Path, username: str, host: str):
         f"/port:{args.port}",
         f"/u:{username}",
         "/from-stdin:force",
-        "/dvc:rdp2exec",
+        "/dvc:agent-rdp",
         f"/drive:{args.drive_name},{share_dir}",
         f"/shell:{alternate_shell}",
         f"/shell-dir:\\\\tsclient\\{args.drive_name}",
@@ -594,7 +598,7 @@ def interactive_bridge(conn: socket.socket, debug: bool = False):
                 return
             for frame_type, payload in parser.feed(data):
                 if frame_type == FRAME_READY:
-                    debug_print(debug, "\r\n[rdp2exec] ConPTY bridge ready. Type `exit` to close. Ctrl-] detaches local client.\r\n", file=sys.stderr, flush=True)
+                    debug_print(debug, "\r\n[agent-rdp] ConPTY bridge ready. Type `exit` to close. Ctrl-] detaches local client.\r\n", file=sys.stderr, flush=True)
                     try:
                         send_frame(conn, FRAME_INPUT, b"\r")
                     except OSError:
@@ -604,14 +608,14 @@ def interactive_bridge(conn: socket.socket, debug: bool = False):
                     os.write(sys.stdout.fileno(), payload)
                 elif frame_type == FRAME_ERROR:
                     text = payload.decode("utf-8", errors="replace")
-                    debug_print(debug, f"\r\n[rdp2exec] remote error: {text}\r", file=sys.stderr)
+                    debug_print(debug, f"\r\n[agent-rdp] remote error: {text}\r", file=sys.stderr)
                 elif frame_type == FRAME_EXIT:
                     exit_code = struct.unpack("<I", payload[:4])[0] if len(payload) >= 4 else 0
-                    debug_print(debug, f"\r\n[rdp2exec] remote exited with code {exit_code}\r", file=sys.stderr)
+                    debug_print(debug, f"\r\n[agent-rdp] remote exited with code {exit_code}\r", file=sys.stderr)
                     stop.set()
                     return
                 else:
-                    debug_print(debug, f"\r\n[rdp2exec] unknown frame type {frame_type} len={len(payload)}\r", file=sys.stderr)
+                    debug_print(debug, f"\r\n[agent-rdp] unknown frame type {frame_type} len={len(payload)}\r", file=sys.stderr)
 
     t = threading.Thread(target=recv_loop, daemon=True)
     t.start()
@@ -703,14 +707,14 @@ def run_command_session(conn: socket.socket, *, target: str = "", stream: bool =
                 text = payload.decode("utf-8", errors="replace")
                 result.error = classify_error(text)
                 result.error_detail = text
-                debug_print(debug, f"\n[rdp2exec] remote error: {text}", file=sys.stderr)
+                debug_print(debug, f"\n[agent-rdp] remote error: {text}", file=sys.stderr)
             elif frame_type == FRAME_EXIT:
                 result.exit_code = struct.unpack("<I", payload[:4])[0] if len(payload) >= 4 else 0
                 got_exit = True
-                debug_print(debug, f"\n[rdp2exec] remote exited with code {result.exit_code}", file=sys.stderr)
+                debug_print(debug, f"\n[agent-rdp] remote exited with code {result.exit_code}", file=sys.stderr)
                 break
             else:
-                debug_print(debug, f"\n[rdp2exec] unknown frame type {frame_type} len={len(payload)}", file=sys.stderr)
+                debug_print(debug, f"\n[agent-rdp] unknown frame type {frame_type} len={len(payload)}", file=sys.stderr)
         if got_exit:
             break
 
@@ -788,15 +792,15 @@ def do_connect(args, username: str, host: str, password: str, *, stream: bool = 
     wfreerdp subprocess -- nothing target-specific is shared through `args`.
     """
     target = f"{username}@{host}"
-    with tempfile.TemporaryDirectory(prefix="rdp2exec-share-") if not args.share_dir else nullcontext(Path(args.share_dir)) as tmp:
+    with tempfile.TemporaryDirectory(prefix="agent-rdp-share-") if not args.share_dir else nullcontext(Path(args.share_dir)) as tmp:
         share_dir = Path(tmp) if isinstance(tmp, str) else tmp
 
         with LoopbackSocketServer() as server:
             env = dict(os.environ)
-            env["RDP2EXEC_SOCKET"] = server.endpoint
+            env["AGENT_RDP_SOCKET"] = server.endpoint
 
             cmd = build_wfreerdp_command(args, share_dir, username, host)
-            debug_print(args.debug, f"[rdp2exec] launching ({target}):", " ".join(shlex.quote(str(x)) for x in cmd), file=sys.stderr)
+            debug_print(args.debug, f"[agent-rdp] launching ({target}):", " ".join(shlex.quote(str(x)) for x in cmd), file=sys.stderr)
 
             popen_kwargs = {"env": env, "stdin": subprocess.PIPE}
             if args.debug:
@@ -833,7 +837,7 @@ def do_connect(args, username: str, host: str, password: str, *, stream: bool = 
                 if not args.debug and proc_logger is not None:
                     recent = [line for line in proc_logger.recent() if line.strip()]
                     if recent:
-                        print(f"[rdp2exec] wfreerdp stderr (most recent, {target}):", file=sys.stderr)
+                        print(f"[agent-rdp] wfreerdp stderr (most recent, {target}):", file=sys.stderr)
                         for line in recent[-20:]:
                             print(f"[wfreerdp] {line}", file=sys.stderr)
                 raise
@@ -916,7 +920,7 @@ def run_single_target(args, username: str, host: str, password: str) -> int:
 
 
 def parser():
-    p = argparse.ArgumentParser(description="Windows-to-Windows rdp2exec: run cmd/PowerShell on a remote Windows host over RDP")
+    p = argparse.ArgumentParser(description="Windows-to-Windows agent-rdp: run cmd/PowerShell on a remote Windows host over RDP")
     p.add_argument("target", nargs="?", default="",
                    help="Remote target as user@hostname. Pass a comma-separated list "
                         "(user@h1,user@h2) or use --targets-file to fan a command out across "
@@ -928,35 +932,35 @@ def parser():
     p.add_argument("-d", "--domain", default=os.environ.get("RDP_DOMAIN", ""))
     p.add_argument("--cert-ignore", action="store_true", default=True)
     p.add_argument("--wfreerdp", default=os.environ.get("WFREERDP", DEFAULT_WFREERDP))
-    p.add_argument("--plugin-dir", default=os.environ.get("RDP2EXEC_PLUGIN_DIR", DEFAULT_PLUGIN_DIR))
-    p.add_argument("--plugin-name", default=os.environ.get("RDP2EXEC_PLUGIN_NAME", DEFAULT_PLUGIN_NAME))
-    p.add_argument("--helper-exe", default=os.environ.get("RDP2EXEC_HELPER_EXE", DEFAULT_HELPER_EXE))
-    p.add_argument("--accept-timeout", type=float, default=float(os.environ.get("RDP2EXEC_ACCEPT_TIMEOUT", "60.0")))
+    p.add_argument("--plugin-dir", default=os.environ.get("AGENT_RDP_PLUGIN_DIR", DEFAULT_PLUGIN_DIR))
+    p.add_argument("--plugin-name", default=os.environ.get("AGENT_RDP_PLUGIN_NAME", DEFAULT_PLUGIN_NAME))
+    p.add_argument("--helper-exe", default=os.environ.get("AGENT_RDP_HELPER_EXE", DEFAULT_HELPER_EXE))
+    p.add_argument("--accept-timeout", type=float, default=float(os.environ.get("AGENT_RDP_ACCEPT_TIMEOUT", "60.0")))
     p.add_argument("--drive-poll-timeout", type=float,
-                   default=float(os.environ.get("RDP2EXEC_DRIVE_POLL_TIMEOUT", "20.0")),
+                   default=float(os.environ.get("AGENT_RDP_DRIVE_POLL_TIMEOUT", "20.0")),
                    help="Seconds the remote-side retry loop waits for the redirected drive to mount before giving up")
-    p.add_argument("--drive-name", default=os.environ.get("RDP2EXEC_DRIVE_NAME", DEFAULT_DRIVE_NAME))
-    p.add_argument("--share-dir", default=os.environ.get("RDP2EXEC_SHARE_DIR", ""))
-    p.add_argument("--enable-clipboard", action="store_true", default=bool(int(os.environ.get("RDP2EXEC_ENABLE_CLIPBOARD", "0"))))
-    p.add_argument("--debug", action="store_true", default=bool(int(os.environ.get("RDP2EXEC_DEBUG", "0"))))
+    p.add_argument("--drive-name", default=os.environ.get("AGENT_RDP_DRIVE_NAME", DEFAULT_DRIVE_NAME))
+    p.add_argument("--share-dir", default=os.environ.get("AGENT_RDP_SHARE_DIR", ""))
+    p.add_argument("--enable-clipboard", action="store_true", default=bool(int(os.environ.get("AGENT_RDP_ENABLE_CLIPBOARD", "0"))))
+    p.add_argument("--debug", action="store_true", default=bool(int(os.environ.get("AGENT_RDP_DEBUG", "0"))))
     # Structured output (#2) / error vocabulary (#7)
     p.add_argument("-j", "--json", action="store_true",
-                   default=bool(int(os.environ.get("RDP2EXEC_JSON", "0"))),
+                   default=bool(int(os.environ.get("AGENT_RDP_JSON", "0"))),
                    help="Emit a single JSON object {target, exit_code, stdout, stderr, error, "
                         "error_detail} instead of streaming raw output (single-command mode only). "
                         "Multi-target mode always emits a JSON array.")
     # Credential Manager (#4)
-    p.add_argument("--credential-target", default=os.environ.get("RDP2EXEC_CREDENTIAL_TARGET", ""),
+    p.add_argument("--credential-target", default=os.environ.get("AGENT_RDP_CREDENTIAL_TARGET", ""),
                    help="Read the RDP password from a Windows Credential Manager generic "
                         "credential stored under this target name (unattended use).")
     p.add_argument("--save-credential", action="store_true", default=False,
                    help="Store the resolved password in Windows Credential Manager under "
                         "--credential-target for later unattended runs, then continue.")
     # Multi-target concurrency (#6)
-    p.add_argument("--targets-file", default=os.environ.get("RDP2EXEC_TARGETS_FILE", ""),
+    p.add_argument("--targets-file", default=os.environ.get("AGENT_RDP_TARGETS_FILE", ""),
                    help="Path to a file with one user@host per line (blank lines and # comments "
                         "ignored); fans the command out across all of them in parallel.")
-    p.add_argument("--max-parallel", type=int, default=int(os.environ.get("RDP2EXEC_MAX_PARALLEL", "4")),
+    p.add_argument("--max-parallel", type=int, default=int(os.environ.get("AGENT_RDP_MAX_PARALLEL", "4")),
                    help="Maximum number of targets to run concurrently in multi-target mode.")
     return p
 

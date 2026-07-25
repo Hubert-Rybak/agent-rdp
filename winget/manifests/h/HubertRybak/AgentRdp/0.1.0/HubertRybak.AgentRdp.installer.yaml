@@ -7,8 +7,8 @@ MinimumOSVersion: 10.0.17763.0 # ConPTY (used by the remote-side bridge) require
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
-  - RelativeFilePath: rdp2exec.exe
-    PortableCommandAlias: rdp2exec
+  - RelativeFilePath: agent-rdp.exe
+    PortableCommandAlias: agent-rdp
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/Hubert-Rybak/agent-rdp/releases/download/v0.1.0/agent-rdp-v0.1.0-x64.zip
