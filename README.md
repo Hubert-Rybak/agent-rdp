@@ -27,6 +27,8 @@ Building from source has its own toolchain requirements — see [Build](#build).
 
 ## Install
 
+This is not a pure-Python tool: the launcher drives three native binaries — `wfreerdp.exe` (FreeRDP's Windows client) plus this repo's own `rdp2exec-client.dll` and `rdp2exec_bridge.exe`, both compiled from C++. For a **self-contained install that just works**, use the [winget](#winget) package or the [pre-built release](#pre-built-release) zip — both bundle the launcher and all three binaries together. The [uv](#uv) path installs only the Python launcher, so it's for working from a source checkout where you've already built (or can point at) those binaries.
+
 ### Pre-built release
 
 Every tag push (`v*.*.*`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds `rdp2exec-client.dll` and `rdp2exec_bridge.exe`, bundles `wfreerdp.exe`, freezes the launcher into a standalone `rdp2exec.exe` (via PyInstaller — no separate Python install required), zips it all together, and publishes it to [Releases](https://github.com/Hubert-Rybak/agent-rdp/releases) with a `.sha256.txt` checksum. Download the zip for a release, extract it anywhere, and run `rdp2exec.exe` from that folder.
@@ -46,33 +48,26 @@ Notes:
 
 ### uv
 
-The launcher is a single, **stdlib-only** Python script (3.10+, no third-party packages), and the repo ships a [`pyproject.toml`](pyproject.toml) that packages it as a console script named `rdp2exec`. [`uv`](https://github.com/astral-sh/uv) is the quickest way to install or run it — it provisions a matching Python for you, so you don't have to manage one yourself.
+> **For a self-contained install, use [winget](#winget) or the [pre-built release](#pre-built-release) instead** — they bundle the native binaries. Reach for `uv` only when you're working from a source checkout and just want the Python launcher without managing a Python install yourself.
+
+The launcher is a single, **stdlib-only** Python script (3.10+, no third-party packages), and the repo ships a [`pyproject.toml`](pyproject.toml) that packages it as a console script named `rdp2exec`. [`uv`](https://github.com/astral-sh/uv) provisions a matching Python for you and runs or installs it in one step:
 
 ```powershell
 # Install uv (if you don't have it)
 winget install astral-sh.uv
-```
 
-**Install the `rdp2exec` command onto your PATH** (from a repo checkout):
-
-```powershell
+# Install the rdp2exec command onto your PATH (from a repo checkout)...
 uv tool install .
-rdp2exec user@host cmd whoami
-```
 
-**Run it once, without installing** — `uvx` builds and runs it in a throwaway environment:
-
-```powershell
+# ...or run it once, without installing (uvx builds it in a throwaway env)...
 uvx --from . rdp2exec user@host cmd whoami
-```
 
-**Run the script directly from a source checkout**, no install and no packaging — `uv run` reads the script's inline `requires-python` and fetches a 3.10+ interpreter as needed:
-
-```powershell
+# ...or run the script straight from source, no packaging at all
+# (uv reads the script's inline requires-python and fetches Python 3.10+):
 uv run src/launcher/rdp2exec.py user@host cmd whoami
 ```
 
-Note: `uv` only covers the **Python launcher**. The tool still needs the native binaries it drives — `rdp2exec-client.dll` and `rdp2exec_bridge.exe` — plus `wfreerdp.exe`, which come from a [pre-built release](#pre-built-release) or a [source build](#from-source). Point the launcher at them with `--plugin-dir` / `--helper-exe` / `--wfreerdp` (or keep them on `PATH` / in the release layout, which the launcher already discovers).
+**Important — `uv` installs only the Python launcher, not the engine.** The tool still needs the three native binaries it drives: `rdp2exec-client.dll`, `rdp2exec_bridge.exe`, and `wfreerdp.exe`. `uv` cannot build these — they come from [`scripts/build.ps1`](#build) (into `artifacts/`) or from a [pre-built release](#pre-built-release). The launcher auto-discovers them in the repo's `artifacts/` directory when run from a source checkout; a `uv tool install`-ed command outside the tree needs them pointed to explicitly via `--plugin-dir` / `--helper-exe` / `--wfreerdp` (or the matching `RDP2EXEC_PLUGIN_DIR` / `RDP2EXEC_HELPER_EXE` / `WFREERDP` environment variables). Without them the launcher fails fast with `local_setup_error` before connecting.
 
 ### From source
 
