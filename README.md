@@ -171,6 +171,73 @@ The only thing that ever touches the target host's local filesystem is whatever 
 
 Everything staged for a session lives in an ephemeral temp directory on the **client** (the machine running `rdp2exec.py`), for the lifetime of that RDP connection.
 
+### End-to-end walkthrough
+
+What actually happens between typing `rdp2exec.exe user@host cmd whoami` and getting output back:
+
+1. **Resolve and validate (client).** The launcher parses the target(s), resolves the password (`-P` → `RDP_PASSWORD` → Credential Manager → interactive prompt), and confirms the two local binaries it needs exist: the FreeRDP plugin (`rdp2exec-client.dll`) and the bridge exe (`rdp2exec_bridge.exe`). Anything missing here fails fast as `local_setup_error` before a connection is attempted.
+2. **Open a loopback listener (client).** `LoopbackSocketServer` binds `127.0.0.1:0` — the OS picks a free port — and starts listening for exactly one connection. The chosen `host:port` is exported as the `RDP2EXEC_SOCKET` environment variable, which is how the plugin (below) will find its way back to this launcher instance. A random OS-assigned port per run is what makes concurrent multi-target sessions safe — no two collide.
+3. **Stage the payload into a redirected drive (client).** The bridge exe is copied into an ephemeral client-side temp dir, and — in single-command mode — a small `.ps1` or `.cmd` script wrapping your command is written next to it. That temp dir is handed to `wfreerdp.exe` as a redirected drive (`/drive:r2e,<tempdir>`), so the target will see its contents at `\\tsclient\r2e\...`. These files live on the **client's** disk; the target only ever reads them across the RDP device-redirection channel.
+4. **Launch the RDP client with an Alternate Shell (client).** `wfreerdp.exe` is spawned with the target/credentials, the redirected drive, a Dynamic Virtual Channel registration (`/dvc:rdp2exec`), and an **Alternate Shell** command line (`/shell:` + `/shell-dir:`). The password is fed to `wfreerdp` over stdin (`/from-stdin:force`) rather than the command line. See [Bootstrapping without GUI automation](#bootstrapping-without-gui-automation) for what that shell command actually does.
+5. **Session logon runs the bridge (target).** On logon, RDP runs the Alternate Shell command instead of the normal desktop shell. That command polls for the redirected drive to mount, then executes `rdp2exec_bridge.exe` straight off `\\tsclient\r2e\` — no copy to local disk.
+6. **The bridge opens the channel from the inside (target).** The bridge calls `WTSVirtualChannelOpenEx(WTS_CURRENT_SESSION, "rdp2exec", …DYNAMIC)` to open the server end of the `rdp2exec` DVC from within the RDP session.
+7. **The plugin bridges DVC ↔ loopback (client).** Inside `wfreerdp.exe`, FreeRDP loads `rdp2exec-client.dll` as the handler for the `rdp2exec` DVC. When the channel opens, the plugin reads `RDP2EXEC_SOCKET`, connects a TCP socket back to the launcher's loopback listener (retrying while the connection is refused), and from then on shuttles raw bytes both ways: DVC → socket, and socket → DVC.
+8. **The launcher accepts the connection (client).** `server.accept(timeout=--accept-timeout)` (default 60s) unblocks the moment the plugin connects. Now there is a continuous byte pipe: **launcher ⇄ loopback socket ⇄ plugin ⇄ DVC ⇄ bridge**. Everything above this point was setup; everything below is framed protocol over that pipe.
+9. **Run and stream (both ends).** The bridge spawns the child shell/command and relays its I/O back as [protocol frames](#the-framed-wire-protocol); the launcher decodes them, writing output to your stdout/stderr (or buffering it for `--json`). A final exit-code frame ends the run, and the launcher exits with that code.
+
+### The framed wire protocol
+
+The byte pipe carries a simple length-prefixed framing shared by both ends (`src/common/protocol.hpp`, and mirrored in the launcher's `FrameParser`/`send_frame`). Every frame is:
+
+```
++--------+------------------------+-----------------+
+| type   | length (uint32, LE)    | payload         |
+| 1 byte | 4 bytes                | `length` bytes  |
++--------+------------------------+-----------------+
+```
+
+| Frame | Value | Direction | Meaning |
+|---|---|---|---|
+| `kInput` | `0x01` | launcher → bridge | stdin bytes (keystrokes, or piped input) for the child |
+| `kResize` | `0x02` | launcher → bridge | new terminal size (`cols`, `rows` as two uint16 LE); resizes the ConPTY |
+| `kClose` | `0x03` | launcher → bridge | detach/terminate request |
+| `kReady` | `0x81` | bridge → launcher | child spawned, channel live (launcher nudges an interactive shell with a `\r` to draw its first prompt) |
+| `kOutput` | `0x82` | bridge → launcher | stdout bytes (in ConPTY mode this is the merged terminal stream) |
+| `kExit` | `0x83` | bridge → launcher | child exited; payload is its exit code (uint32 LE) |
+| `kError` | `0x84` | bridge → launcher | a remote-side setup failure, as free text (folded into the [stable error slugs](#stable-error-vocabulary)) |
+| `kOutputErr` | `0x85` | bridge → launcher | stderr bytes — **pipe mode only**; ConPTY mode never emits this |
+
+One detail specific to the DVC transport: FreeRDP delivers DVC data to the bridge prefixed with an 8-byte channel PDU header, which the bridge strips (`kChannelPduLength`) before feeding the remainder to its frame parser. The launcher↔plugin loopback leg carries the raw frame bytes with no such header, because the plugin passes socket bytes through to the channel verbatim.
+
+### Execution modes: ConPTY vs. pipe
+
+The bridge chooses one of two modes based on whether it was given a `--command-file`, and the two behave deliberately differently:
+
+**Interactive (ConPTY) mode** — no command supplied. The bridge creates a real Windows pseudo console (`CreatePseudoConsole`) and attaches the child shell to it via a process-thread attribute list. This gives a genuine terminal: stdout and stderr are **merged** into one stream carrying ANSI/VT control sequences, `kResize` frames retune the console dimensions, and the launcher puts the local console into raw VT pass-through mode so keystrokes flow through unmodified. This is what you get for an interactive shell session — good for a human, awkward for a program to parse.
+
+**Pipe mode** — a `--command-file` is supplied (any single-command / agent invocation). The bridge wires the child up to three plain anonymous pipes with `CREATE_NO_WINDOW` and **no** pseudo console, so:
+
+- stdout and stderr stay **separate** (`kOutput` vs. `kOutputErr`), each free of terminal control sequences;
+- the child's real exit code comes back in the `kExit` frame;
+- there's nothing to resize, so `kResize` is ignored.
+
+That clean separation is exactly what makes single-command mode parseable, and it's the basis for `--json` (the launcher just buffers the two streams and the exit code into one object instead of streaming them live). The command itself is never passed as a raw string to be re-quoted on the target: the launcher generates a script file (`build_command_script`) with per-shell quoting — PowerShell single-quote literals, or `cmd` token quoting — that propagates `$LASTEXITCODE`/`%ERRORLEVEL%` back out as the process exit code.
+
+### Bootstrapping without GUI automation
+
+The one genuinely non-obvious mechanism is how the bridge gets launched on the target without any visible-desktop interaction. Upstream `rdp2exec` simulated `Win+R` and typed into the Run dialog over X11; this fork uses RDP's native **Alternate Shell** (a.k.a. Initial Program) feature instead. `build_alternate_shell` emits a command line like:
+
+```bat
+cmd.exe /d /c "for /l %i in (1,1,20) do (if exist \\tsclient\r2e\rdp2exec_bridge.exe (\\tsclient\r2e\rdp2exec_bridge.exe --channel rdp2exec --child cmd --cols 120 --rows 40 --command-file \\tsclient\r2e\rdp2exec-command.cmd & exit /b) else (ping -n 2 127.0.0.1>nul))"
+```
+
+- RDP runs this in place of the normal shell at logon — headless, no desktop automation, no keystroke injection.
+- The `for /l` loop exists because **device redirection can lag a moment behind logon**: the `\\tsclient\` drive isn't guaranteed mounted the instant the shell starts. The loop retries `--drive-poll-timeout` times (default 20), sleeping ~1s each miss (`ping -n 2`), until the bridge exe appears, then runs it and exits.
+- The drive name and staged filenames are kept short and space-free by construction so the whole command needs no inner quoting and stays well under RDP's historical AlternateShell field length limit.
+- `/shell-dir:\\tsclient\r2e` sets the working directory to the redirected drive so the bridge starts there.
+
+> **Note:** the timing of that drive-mount race (how long redirection actually lags) is one of the port's [unverified assumptions](MIGRATION_NOTES.md#known-limitations--unverified-assumptions) — the retry loop is the safety margin, and `--drive-poll-timeout` is the knob if a slow target needs longer.
+
 ## Build
 
 Prerequisites:
