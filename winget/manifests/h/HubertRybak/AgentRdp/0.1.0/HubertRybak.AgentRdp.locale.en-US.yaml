@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: HubertRybak.AgentRdp
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: Hubert Rybak
+PublisherUrl: https://github.com/Hubert-Rybak
+PublisherSupportUrl: https://github.com/Hubert-Rybak/agent-rdp/issues
+PackageName: agent-rdp
+PackageUrl: https://github.com/Hubert-Rybak/agent-rdp
+License: MIT
+LicenseUrl: https://github.com/Hubert-Rybak/agent-rdp/blob/master/LICENSE
+ShortDescription: Windows-to-Windows RDP command execution bridge for AI agents
+Description: >-
+  agent-rdp drives cmd/PowerShell on a remote Windows RDP host from a
+  Windows client, using RDP's native Alternate Shell feature and a Dynamic
+  Virtual Channel. No extra management port is opened, and no files are
+  persisted on the target host's disk. Ships a single-command "pipe mode"
+  with separated stdout/stderr and an exit code, intended for an AI agent
+  or script to invoke as a tool.
+Tags:
+  - rdp
+  - remote-administration
+  - automation
+  - ai-agent
+  - freerdp
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

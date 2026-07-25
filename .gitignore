@@ -1,0 +1,6 @@
+build/
+artifacts/
+vcpkg_installed/
+.vcpkg/
+__pycache__/
+*.pyc

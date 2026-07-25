@@ -1,0 +1,13 @@
+{
+  "name": "agent-rdp",
+  "version": "1.0.0",
+  "description": "Windows-to-Windows RDP command execution bridge for AI agents",
+  "dependencies": [
+    "pkgconf",
+    {
+      "name": "freerdp",
+      "default-features": false,
+      "features": ["client"]
+    }
+  ]
+}

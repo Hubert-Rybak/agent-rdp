@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  python-check:
+    name: Python syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile-check the launcher
+        run: python -m py_compile src/launcher/rdp2exec.py
+
+  windows-build:
+    name: Windows build (plugin DLL + bridge EXE)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Native components require FreeRDP built for Windows via vcpkg, which
+      # is the slow part of this job -- cache it across runs.
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vcpkg
+            vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-
+
+      - name: Build rdp2exec-client.dll + rdp2exec_bridge.exe
+        shell: pwsh
+        run: ./scripts/build.ps1
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp2exec-windows-build
+          path: artifacts/
+          if-no-files-found: warn
