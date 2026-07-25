@@ -46,11 +46,31 @@ def set_binary_mode():
         except (OSError, ValueError):
             pass
 
-DEFAULT_PLUGIN_DIR = os.environ.get("RDP2EXEC_PLUGIN_DIR", str(Path(__file__).resolve().parents[2] / "artifacts"))
+def _default_artifacts_dir() -> Path:
+    """Where rdp2exec-client.dll / rdp2exec_bridge.exe / wfreerdp.exe are
+    expected to live by default.
+
+    In a source checkout that's <repo>/artifacts (populated by
+    scripts/build.ps1). When frozen into a standalone exe (PyInstaller, as
+    used for the winget package), __file__ no longer reflects the source
+    tree -- sys.executable's own directory is the install directory, and
+    the winget zip lays everything out flat alongside rdp2exec.exe there.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2] / "artifacts"
+
+
+DEFAULT_ARTIFACTS_DIR = _default_artifacts_dir()
+DEFAULT_PLUGIN_DIR = os.environ.get("RDP2EXEC_PLUGIN_DIR", str(DEFAULT_ARTIFACTS_DIR))
 DEFAULT_PLUGIN_NAME = "rdp2exec-client.dll"
-DEFAULT_WFREERDP = "wfreerdp.exe"
+# Prefer a wfreerdp.exe staged alongside our own binaries (source-tree
+# artifacts/, or the flat winget/PyInstaller install layout) over relying on
+# PATH, but still fall back to PATH resolution if one isn't found there.
+_bundled_wfreerdp = DEFAULT_ARTIFACTS_DIR / "wfreerdp.exe"
+DEFAULT_WFREERDP = str(_bundled_wfreerdp) if _bundled_wfreerdp.exists() else "wfreerdp.exe"
 DEFAULT_DRIVE_NAME = "r2e"
-DEFAULT_HELPER_EXE = str(Path(__file__).resolve().parents[2] / "artifacts" / "rdp2exec_bridge.exe")
+DEFAULT_HELPER_EXE = str(DEFAULT_ARTIFACTS_DIR / "rdp2exec_bridge.exe")
 
 FRAME_INPUT = 0x01
 FRAME_RESIZE = 0x02

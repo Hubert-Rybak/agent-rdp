@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build and publish release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vcpkg
+            vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-
+
+      - name: Build native components (plugin DLL + bridge EXE + wfreerdp)
+        shell: pwsh
+        run: ./scripts/build.ps1
+
+      # Freezes the launcher into a standalone rdp2exec.exe so the winget/zip
+      # package is self-contained (no separate Python install required).
+      # See _default_artifacts_dir() in src/launcher/rdp2exec.py: when frozen,
+      # it resolves its companion binaries relative to its own exe directory,
+      # so everything below must land flat in the same folder.
+      - name: Freeze launcher with PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller --onefile --name rdp2exec --distpath artifacts --workpath build/pyinstaller --specpath build src/launcher/rdp2exec.py
+
+      - name: Package release zip
+        id: package
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          $zipName = "agent-rdp-$version-x64.zip"
+          Compress-Archive -Path artifacts/* -DestinationPath $zipName -Force
+          $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash
+          $hash | Out-File -Encoding ascii "$zipName.sha256.txt"
+          Write-Host "SHA256: $hash"
+          "zip_name=$zipName" >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            "${{ steps.package.outputs.zip_name }}" `
+            "${{ steps.package.outputs.zip_name }}.sha256.txt" `
+            --title "${{ github.ref_name }}" `
+            --generate-notes
+
+      - name: Print winget manifest update reminder
+        shell: pwsh
+        run: |
+          Write-Host "Release published. Update winget/manifests/.../${{ github.ref_name }}/*.yaml"
+          Write-Host "  PackageVersion: ${{ github.ref_name }}"
+          Write-Host "  InstallerUrl:   https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.package.outputs.zip_name }}"
+          Write-Host "  InstallerSha256: ${{ steps.package.outputs.sha256 }}"

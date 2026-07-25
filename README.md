@@ -1,5 +1,7 @@
 # agent-rdp
 
+[![CI](https://github.com/Hubert-Rybak/agent-rdp/actions/workflows/ci.yml/badge.svg)](https://github.com/Hubert-Rybak/agent-rdp/actions/workflows/ci.yml)
+
 A Windows-to-Windows fork of [blacknon/rdp2exec](https://github.com/blacknon/rdp2exec), retargeted so an AI agent (or any script) running on a **Windows** host can execute `cmd`/PowerShell commands on a remote **Windows** RDP target, without opening any extra management port and **without ever writing a file to the target's local disk**.
 
 ## What changed vs. upstream rdp2exec
@@ -54,8 +56,31 @@ Everything staged for a session lives in an ephemeral temp directory on the **cl
 - A Windows host to run the launcher/client from (PowerShell 7+ recommended).
 - A C++ toolchain to build the plugin/bridge: Visual Studio Build Tools ("Desktop development with C++") or mingw-w64, plus CMake and Ninja.
 - [vcpkg](https://github.com/microsoft/vcpkg) (the build script will bootstrap a local copy automatically if `VCPKG_ROOT` isn't set).
-- Python 3.10+ on the client host, to run `src/launcher/rdp2exec.py`.
+- Python 3.10+ on the client host, to run `src/launcher/rdp2exec.py` (not needed if you install the packaged `rdp2exec.exe` via winget/Releases -- see below).
 - A Windows target with RDP enabled and a user account you can authenticate as.
+
+## Install
+
+### Via a pre-built release
+
+Every tag push (`v*.*.*`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds `rdp2exec-client.dll`, `rdp2exec_bridge.exe`, bundles `wfreerdp.exe`, freezes the launcher into a standalone `rdp2exec.exe` (via PyInstaller, so no separate Python install is required), zips it all up, and publishes it to [Releases](https://github.com/Hubert-Rybak/agent-rdp/releases) with a `.sha256.txt` checksum. Download the zip for a release, extract it anywhere, and run `rdp2exec.exe` from that folder.
+
+### Via winget
+
+A local winget manifest lives under [`winget/manifests/h/HubertRybak/AgentRdp/`](winget/manifests/h/HubertRybak/AgentRdp/), laid out in the same directory convention the [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) community repo uses (`InstallerType: zip` + `NestedInstallerType: portable`, so `winget` puts a `rdp2exec` command on your `PATH`). To install from it directly, without waiting on a public submission:
+
+```powershell
+winget install --manifest winget/manifests/h/HubertRybak/AgentRdp/0.1.0
+```
+
+Notes:
+- The manifest's `InstallerUrl`/`InstallerSha256` must match a real published release asset — after cutting a release, update `winget/manifests/.../<version>/HubertRybak.AgentRdp.installer.yaml` with the version, URL, and SHA256 the release workflow prints (or add a new version folder for the new release).
+- This has **not** been submitted to the public `microsoft/winget-pkgs` repository (that's a separate, manual PR to an external repo this session doesn't have access to) — today this manifest only gets you `winget install --manifest <path>` against a local checkout, not a plain `winget install agent-rdp` from a fresh machine.
+- Untested against a real `winget` install end-to-end (no Windows environment was available while building this) -- treat it as a starting point to validate, not a guarantee.
+
+### From source
+
+Build it yourself -- see [Build](#build) below.
 
 ## Build
 
@@ -68,6 +93,8 @@ This bootstraps vcpkg, installs FreeRDP (`client` feature) via `vcpkg.json`, bui
 > **Note:** FreeRDP's Windows client loads Dynamic Virtual Channel plugins from an addin search path whose exact layout can vary by FreeRDP version/build. `build.ps1` stages `rdp2exec-client.dll` next to `wfreerdp.exe` in `./artifacts`, which covers the common "same directory as the client" convention — if your `wfreerdp.exe` doesn't pick it up from there, check your build's addin directory and copy the DLL there too.
 
 ## Usage
+
+> Installed via winget or a Release zip? Use `rdp2exec.exe` in place of `python src/launcher/rdp2exec.py` in every example below — same arguments, same behavior, just a standalone exe instead of a source-tree script.
 
 ```powershell
 # Login shell: PowerShell (default)
