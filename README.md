@@ -44,6 +44,22 @@ Notes:
 - This has **not** been submitted to the public `microsoft/winget-pkgs` repository — that's a separate manual PR to an external repo, up to whoever maintains this fork to do when they're ready. Today this manifest gets you `winget install --manifest <path>` against a local checkout, not a plain `winget install agent-rdp` from a fresh machine.
 - Not yet validated end-to-end against a real `winget install` — treat it as a starting point to verify, not a guarantee.
 
+### uv
+
+The launcher (`src/launcher/rdp2exec.py`) is a single, **stdlib-only** Python script (3.10+, no third-party packages), so [`uv`](https://github.com/astral-sh/uv) is the quickest way to run it from a source checkout without managing a Python install yourself — `uv` provisions the interpreter and runs the script in one step:
+
+```powershell
+# Install uv (if you don't have it)
+winget install astral-sh.uv
+
+# From the repo root: uv fetches Python 3.10+ as needed and runs the launcher
+uv run --python 3.10 src/launcher/rdp2exec.py user@host cmd whoami
+```
+
+There are no dependencies to install (`uv pip install` / a `pyproject.toml` aren't needed) — `uv run` just gives you a known-good Python for the script.
+
+Note: `uv` only covers the **Python launcher**. The tool still needs the two native binaries it drives — `rdp2exec-client.dll` and `rdp2exec_bridge.exe` — plus `wfreerdp.exe`, which come from a [pre-built release](#pre-built-release) or a [source build](#from-source). Put them where the launcher can find them (the release/build layout already does this), then use `uv run` in place of a bare `python` for the launcher itself.
+
 ### From source
 
 See [Build](#build).
