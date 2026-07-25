@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-rdp"
+version = "0.1.0"
+description = "Windows-to-Windows RDP command execution: run cmd/PowerShell on a remote Windows target over RDP, with no extra port and no writes to the target's disk."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Hubert Rybak" }]
+keywords = ["rdp", "windows", "freerdp", "remote-execution", "wfreerdp"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+]
+# The launcher is intentionally dependency-free (Python standard library only).
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Hubert-Rybak/agent-rdp"
+Repository = "https://github.com/Hubert-Rybak/agent-rdp"
+
+[project.scripts]
+rdp2exec = "rdp2exec:main"
+
+# The launcher is a single-file module. Ship src/launcher/rdp2exec.py as the
+# top-level importable module `rdp2exec` so the console script above resolves.
+[tool.hatch.build.targets.wheel]
+force-include = { "src/launcher/rdp2exec.py" = "rdp2exec.py" }
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/launcher/rdp2exec.py",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]

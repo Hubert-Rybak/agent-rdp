@@ -46,19 +46,33 @@ Notes:
 
 ### uv
 
-The launcher (`src/launcher/rdp2exec.py`) is a single, **stdlib-only** Python script (3.10+, no third-party packages), so [`uv`](https://github.com/astral-sh/uv) is the quickest way to run it from a source checkout without managing a Python install yourself — `uv` provisions the interpreter and runs the script in one step:
+The launcher is a single, **stdlib-only** Python script (3.10+, no third-party packages), and the repo ships a [`pyproject.toml`](pyproject.toml) that packages it as a console script named `rdp2exec`. [`uv`](https://github.com/astral-sh/uv) is the quickest way to install or run it — it provisions a matching Python for you, so you don't have to manage one yourself.
 
 ```powershell
 # Install uv (if you don't have it)
 winget install astral-sh.uv
-
-# From the repo root: uv fetches Python 3.10+ as needed and runs the launcher
-uv run --python 3.10 src/launcher/rdp2exec.py user@host cmd whoami
 ```
 
-There are no dependencies to install (`uv pip install` / a `pyproject.toml` aren't needed) — `uv run` just gives you a known-good Python for the script.
+**Install the `rdp2exec` command onto your PATH** (from a repo checkout):
 
-Note: `uv` only covers the **Python launcher**. The tool still needs the two native binaries it drives — `rdp2exec-client.dll` and `rdp2exec_bridge.exe` — plus `wfreerdp.exe`, which come from a [pre-built release](#pre-built-release) or a [source build](#from-source). Put them where the launcher can find them (the release/build layout already does this), then use `uv run` in place of a bare `python` for the launcher itself.
+```powershell
+uv tool install .
+rdp2exec user@host cmd whoami
+```
+
+**Run it once, without installing** — `uvx` builds and runs it in a throwaway environment:
+
+```powershell
+uvx --from . rdp2exec user@host cmd whoami
+```
+
+**Run the script directly from a source checkout**, no install and no packaging — `uv run` reads the script's inline `requires-python` and fetches a 3.10+ interpreter as needed:
+
+```powershell
+uv run src/launcher/rdp2exec.py user@host cmd whoami
+```
+
+Note: `uv` only covers the **Python launcher**. The tool still needs the native binaries it drives — `rdp2exec-client.dll` and `rdp2exec_bridge.exe` — plus `wfreerdp.exe`, which come from a [pre-built release](#pre-built-release) or a [source build](#from-source). Point the launcher at them with `--plugin-dir` / `--helper-exe` / `--wfreerdp` (or keep them on `PATH` / in the release layout, which the launcher already discovers).
 
 ### From source
 
@@ -66,34 +80,34 @@ See [Build](#build).
 
 ## Usage
 
-> Installed via winget or a Release zip? Use `rdp2exec.exe` in place of `python src/launcher/rdp2exec.py` in every example below — same arguments, same behavior, just a standalone exe instead of a source-tree script.
+> These examples assume `rdp2exec` is on your `PATH` — which is what installing via [winget](#winget) or extracting a [Release zip](#pre-built-release) (and adding its folder to `PATH`) gives you. **Running from a source checkout instead?** Use `python src/launcher/rdp2exec.py` (or `uv run src/launcher/rdp2exec.py`) in place of `rdp2exec` in every example below — same arguments, same behavior.
 
 ```powershell
 # Login shell: PowerShell (default)
-python src/launcher/rdp2exec.py user@hostname
+rdp2exec user@hostname
 
 # Login shell: CMD
-python src/launcher/rdp2exec.py user@hostname cmd
+rdp2exec user@hostname cmd
 
 # Single command, clean separated stdout/stderr + exit code -- the mode an AI agent should use
-python src/launcher/rdp2exec.py user@hostname powershell Get-Process
+rdp2exec user@hostname powershell Get-Process
 
-python src/launcher/rdp2exec.py user@hostname cmd ipconfig /all
+rdp2exec user@hostname cmd ipconfig /all
 
 # Non-default port
-python src/launcher/rdp2exec.py -p 3390 user@hostname
+rdp2exec -p 3390 user@hostname
 
 # Password via argument (or set RDP_PASSWORD)
-python src/launcher/rdp2exec.py -P 'secret' user@hostname powershell
+rdp2exec -P 'secret' user@hostname powershell
 
 # Structured JSON result (single object) -- easiest for a tool layer to parse
-python src/launcher/rdp2exec.py --json user@hostname powershell Get-Service Spooler
+rdp2exec --json user@hostname powershell Get-Service Spooler
 
 # Fan one command out across several targets, in parallel (JSON array result)
-python src/launcher/rdp2exec.py user@h1,user@h2,user@h3 cmd hostname
+rdp2exec user@h1,user@h2,user@h3 cmd hostname
 
 # Unattended: read the password from a stored Windows Credential Manager entry
-python src/launcher/rdp2exec.py --credential-target my-rdp-box user@hostname cmd whoami
+rdp2exec --credential-target my-rdp-box user@hostname cmd whoami
 ```
 
 `command...` triggers single-command mode (non-interactive, plain-pipe I/O). Omit it to get an interactive ConPTY-backed shell.
@@ -103,7 +117,7 @@ python src/launcher/rdp2exec.py --credential-target my-rdp-box user@hostname cmd
 For programmatic/agent use, invoke with a single command and no interactive shell:
 
 ```powershell
-rdp2exec.exe user@host powershell Get-Service -Name Spooler
+rdp2exec user@host powershell Get-Service -Name Spooler
 ```
 
 - stdout and stderr arrive as separate byte streams (no ANSI/terminal control sequences mixed in, since single-command mode bypasses ConPTY).
@@ -148,8 +162,8 @@ Beyond `-P`/`RDP_PASSWORD`/interactive prompt, the password can come from the **
 
 ```powershell
 # Store once (uses the target username), then run unattended later with no -P:
-rdp2exec.exe --credential-target my-rdp-box --save-credential -P 'secret' user@host cmd whoami
-rdp2exec.exe --credential-target my-rdp-box user@host cmd whoami
+rdp2exec --credential-target my-rdp-box --save-credential -P 'secret' user@host cmd whoami
+rdp2exec --credential-target my-rdp-box user@host cmd whoami
 ```
 
 Resolution order: `-P/--password` → `RDP_PASSWORD` → `--credential-target` (Credential Manager) → interactive prompt.
@@ -189,7 +203,7 @@ Everything staged for a session lives in an ephemeral temp directory on the **cl
 
 ### End-to-end walkthrough
 
-What actually happens between typing `rdp2exec.exe user@host cmd whoami` and getting output back:
+What actually happens between typing `rdp2exec user@host cmd whoami` and getting output back:
 
 1. **Resolve and validate (client).** The launcher parses the target(s), resolves the password (`-P` → `RDP_PASSWORD` → Credential Manager → interactive prompt), and confirms the two local binaries it needs exist: the FreeRDP plugin (`rdp2exec-client.dll`) and the bridge exe (`rdp2exec_bridge.exe`). Anything missing here fails fast as `local_setup_error` before a connection is attempted.
 2. **Open a loopback listener (client).** `LoopbackSocketServer` binds `127.0.0.1:0` — the OS picks a free port — and starts listening for exactly one connection. The chosen `host:port` is exported as the `RDP2EXEC_SOCKET` environment variable, which is how the plugin (below) will find its way back to this launcher instance. A random OS-assigned port per run is what makes concurrent multi-target sessions safe — no two collide.

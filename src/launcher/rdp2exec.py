@@ -8,6 +8,10 @@ remote-side bridge executable is run directly off the FreeRDP-redirected
 client drive (a \\\\tsclient\\... UNC path); it is never copied onto the
 target host's local disk.
 """
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
 from __future__ import annotations
 
 import argparse
