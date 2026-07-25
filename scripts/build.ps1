@@ -43,12 +43,17 @@ function Find-VcpkgRoot {
     $local = Join-Path $RepoRoot ".vcpkg"
     if (-not (Test-Path $local)) {
         Write-Host "[rdp2exec] Cloning vcpkg into $local ..."
-        git clone --depth 1 https://github.com/microsoft/vcpkg.git $local
+        # Output of unassigned native-command calls inside a function leaks
+        # into the function's return value in PowerShell -- pipe to Out-Null
+        # so $vcpkgRoot below ends up as the plain path string, not a mix of
+        # git's/the bootstrapper's console output plus the path.
+        git clone --depth 1 https://github.com/microsoft/vcpkg.git $local | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "git clone of vcpkg failed" }
     }
     $bootstrap = Join-Path $local "bootstrap-vcpkg.bat"
     if (-not (Test-Path (Join-Path $local "vcpkg.exe"))) {
         Write-Host "[rdp2exec] Bootstrapping vcpkg ..."
-        & $bootstrap -disableMetrics
+        & $bootstrap -disableMetrics | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed" }
     }
     return $local
