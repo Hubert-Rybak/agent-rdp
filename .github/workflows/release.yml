@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (for example, v0.1.0)"
+        required: true
+        default: "v0.1.0"
 
 permissions:
   contents: write
@@ -13,6 +19,20 @@ jobs:
     name: Build and publish release
     runs-on: windows-latest
     steps:
+      - name: Resolve release version
+        id: release
+        shell: pwsh
+        run: |
+          $version = if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            "${{ inputs.version }}"
+          } else {
+            "${{ github.ref_name }}"
+          }
+          if ($version -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release version must match v<major>.<minor>.<patch>; got '$version'"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -50,7 +70,7 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}"
+          $version = "${{ steps.release.outputs.version }}"
           $zipName = "agent-rdp-$version-x64.zip"
           Compress-Archive -Path artifacts/* -DestinationPath $zipName -Force
           $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash
@@ -64,16 +84,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" `
+          gh release create "${{ steps.release.outputs.version }}" `
             "${{ steps.package.outputs.zip_name }}" `
             "${{ steps.package.outputs.zip_name }}.sha256.txt" `
-            --title "${{ github.ref_name }}" `
+            --target "${{ github.sha }}" `
+            --title "${{ steps.release.outputs.version }}" `
             --generate-notes
 
       - name: Print winget manifest update reminder
         shell: pwsh
         run: |
-          Write-Host "Release published. Update winget/manifests/.../${{ github.ref_name }}/*.yaml"
-          Write-Host "  PackageVersion: ${{ github.ref_name }}"
-          Write-Host "  InstallerUrl:   https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.package.outputs.zip_name }}"
+          Write-Host "Release published. Update the matching winget manifest version."
+          Write-Host "  Release tag:    ${{ steps.release.outputs.version }}"
+          Write-Host "  InstallerUrl:   https://github.com/${{ github.repository }}/releases/download/${{ steps.release.outputs.version }}/${{ steps.package.outputs.zip_name }}"
           Write-Host "  InstallerSha256: ${{ steps.package.outputs.sha256 }}"
