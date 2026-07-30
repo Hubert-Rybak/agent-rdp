@@ -27,47 +27,13 @@ Building from source has its own toolchain requirements — see [Build](#build).
 
 ## Install
 
-This is not a pure-Python tool: the launcher drives three native binaries — `wfreerdp.exe` (FreeRDP's Windows client) plus this repo's own `agent-rdp-client.dll` and `agent-rdp-bridge.exe`, both compiled from C++. For a **self-contained install that just works**, use the [winget](#winget) package or the [pre-built release](#pre-built-release) zip — both bundle the launcher and all three binaries together. The [uv](#uv) path installs only the Python launcher, so it's for working from a source checkout where you've already built (or can point at) those binaries.
+This is not a pure-Python tool: the launcher drives three native binaries — `wfreerdp.exe` (FreeRDP's Windows client) plus this repo's own `agent-rdp-client.dll` and `agent-rdp-bridge.exe`, both compiled from C++. Use a [pre-built release](#pre-built-release) for a self-contained installation, or [build the complete application from source](#build).
 
 ### Pre-built release
 
-Every tag push (`v*.*.*`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds `agent-rdp-client.dll` and `agent-rdp-bridge.exe`, bundles `wfreerdp.exe`, freezes the launcher into a standalone `agent-rdp.exe` (via PyInstaller — no separate Python install required), zips it all together, and publishes it to [Releases](https://github.com/Hubert-Rybak/agent-rdp/releases) with a `.sha256.txt` checksum. Download the zip for a release, extract it anywhere, and run `agent-rdp.exe` from that folder.
+Every tag push (`v*.*.*`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml). Maintainers can also run that workflow manually and supply a semantic release tag. The workflow builds `agent-rdp-client.dll` and `agent-rdp-bridge.exe`, bundles `wfreerdp.exe`, freezes the launcher into a standalone `agent-rdp.exe` (via PyInstaller — no separate Python install required), and publishes the complete ZIP and its `.sha256.txt` checksum to [Releases](https://github.com/Hubert-Rybak/agent-rdp/releases).
 
-### winget
-
-A local winget manifest lives under [`winget/manifests/h/HubertRybak/AgentRdp/`](winget/manifests/h/HubertRybak/AgentRdp/), laid out in the same directory convention the [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) community repo uses (`InstallerType: zip` + `NestedInstallerType: portable`, so `winget` puts an `agent-rdp` command on your `PATH`). Install straight from it, without waiting on a public submission:
-
-```powershell
-winget install --manifest winget/manifests/h/HubertRybak/AgentRdp/0.1.0
-```
-
-Notes:
-- The manifest's `InstallerUrl`/`InstallerSha256` must match a real published release asset — after cutting a release, update `winget/manifests/.../<version>/HubertRybak.AgentRdp.installer.yaml` with the version, URL, and SHA256 the release workflow prints (or add a new version folder for the new release).
-- This has **not** been submitted to the public `microsoft/winget-pkgs` repository — that's a separate manual PR to an external repo, up to whoever maintains this fork to do when they're ready. Today this manifest gets you `winget install --manifest <path>` against a local checkout, not a plain `winget install agent-rdp` from a fresh machine.
-- Not yet validated end-to-end against a real `winget install` — treat it as a starting point to verify, not a guarantee.
-
-### uv
-
-> **For a self-contained install, use [winget](#winget) or the [pre-built release](#pre-built-release) instead** — they bundle the native binaries. Reach for `uv` only when you're working from a source checkout and just want the Python launcher without managing a Python install yourself.
-
-The launcher is a single, **stdlib-only** Python script (3.10+, no third-party packages), and the repo ships a [`pyproject.toml`](pyproject.toml) that packages it as a console script named `agent-rdp`. [`uv`](https://github.com/astral-sh/uv) provisions a matching Python for you and runs or installs it in one step:
-
-```powershell
-# Install uv (if you don't have it)
-winget install astral-sh.uv
-
-# Install the agent-rdp command onto your PATH (from a repo checkout)...
-uv tool install .
-
-# ...or run it once, without installing (uvx builds it in a throwaway env)...
-uvx --from . agent-rdp user@host cmd whoami
-
-# ...or run the script straight from source, no packaging at all
-# (uv reads the script's inline requires-python and fetches Python 3.10+):
-uv run src/launcher/agent_rdp.py user@host cmd whoami
-```
-
-**Important — `uv` installs only the Python launcher, not the engine.** The tool still needs the three native binaries it drives: `agent-rdp-client.dll`, `agent-rdp-bridge.exe`, and `wfreerdp.exe`. `uv` cannot build these — they come from [`scripts/build.ps1`](#build) (into `artifacts/`) or from a [pre-built release](#pre-built-release). The launcher auto-discovers them in the repo's `artifacts/` directory when run from a source checkout; a `uv tool install`-ed command outside the tree needs them pointed to explicitly via `--plugin-dir` / `--helper-exe` / `--wfreerdp` (or the matching `AGENT_RDP_PLUGIN_DIR` / `AGENT_RDP_HELPER_EXE` / `WFREERDP` environment variables). Without them the launcher fails fast with `local_setup_error` before connecting.
+To install, download `agent-rdp-<version>-x64.zip` from the desired release, verify it against the accompanying checksum, extract it, and add the extracted directory to `PATH`. The `agent-rdp` command is then ready to use with all required components included.
 
 ### From source
 
@@ -75,7 +41,7 @@ See [Build](#build).
 
 ## Usage
 
-> These examples assume `agent-rdp` is on your `PATH` — which is what installing via [winget](#winget) or extracting a [Release zip](#pre-built-release) (and adding its folder to `PATH`) gives you. **Running from a source checkout instead?** Use `python src/launcher/agent_rdp.py` (or `uv run src/launcher/agent_rdp.py`) in place of `agent-rdp` in every example below — same arguments, same behavior.
+> These examples assume `agent-rdp` is on your `PATH`, as described under [Pre-built release](#pre-built-release). **Running a complete source build instead?** Use `python src/launcher/agent_rdp.py` in place of `agent-rdp` in every example below — same arguments, same behavior.
 
 ```powershell
 # Login shell: PowerShell (default)
