@@ -242,7 +242,7 @@ Prerequisites:
 ./scripts/build.ps1
 ```
 
-This bootstraps vcpkg, installs FreeRDP (`client` feature) via `vcpkg.json`, builds `agent-rdp-client.dll` and `agent-rdp-bridge.exe` via `CMakeLists.txt`, and stages everything into `./artifacts` alongside a copy of `wfreerdp.exe` and its runtime DLLs.
+This bootstraps vcpkg, installs FreeRDP (`client` feature) via `vcpkg.json` using the repository's `x64-windows-agent-rdp` triplet (which enables the native Windows client disabled by vcpkg's standard port), builds `agent-rdp-client.dll` and `agent-rdp-bridge.exe` via `CMakeLists.txt`, and stages everything into `./artifacts` alongside `wfreerdp.exe` and its runtime DLLs.
 
 > **Note:** FreeRDP's Windows client loads Dynamic Virtual Channel plugins from an addin search path whose exact layout can vary by FreeRDP version/build. `build.ps1` stages `agent-rdp-client.dll` next to `wfreerdp.exe` in `./artifacts`, which covers the common "same directory as the client" convention — if your `wfreerdp.exe` doesn't pick it up from there, check your build's addin directory and copy the DLL there too.
 

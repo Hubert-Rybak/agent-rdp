@@ -21,14 +21,15 @@
     and CMake/Ninja on PATH.
 
 .PARAMETER Triplet
-    vcpkg triplet to build against. Defaults to x64-windows (MSVC, dynamic
-    CRT). Use x64-mingw-dynamic if building with mingw-w64 instead.
+    vcpkg triplet to build against. Defaults to the repository's custom
+    x64-windows-agent-rdp triplet, which enables the wfreerdp Windows client
+    disabled by the upstream vcpkg port.
 
 .PARAMETER Configuration
     CMake build configuration. Defaults to Release.
 #>
 param(
-    [string]$Triplet = "x64-windows",
+    [string]$Triplet = "x64-windows-agent-rdp",
     [string]$Configuration = "Release"
 )
 
@@ -64,7 +65,8 @@ $vcpkgExe = Join-Path $vcpkgRoot "vcpkg.exe"
 $toolchainFile = Join-Path $vcpkgRoot "scripts\buildsystems\vcpkg.cmake"
 
 Write-Host "[agent-rdp] Installing dependencies via vcpkg (triplet=$Triplet) ..."
-& $vcpkgExe install "--triplet=$Triplet" "--x-manifest-root=$RepoRoot" "--x-install-root=$RepoRoot\vcpkg_installed"
+& $vcpkgExe install "--triplet=$Triplet" "--overlay-triplets=$RepoRoot\triplets" `
+    "--x-manifest-root=$RepoRoot" "--x-install-root=$RepoRoot\vcpkg_installed"
 if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
 
 $installedDir = Join-Path $RepoRoot "vcpkg_installed\$Triplet"
@@ -89,7 +91,8 @@ cmake --build $buildDir --config $Configuration
 if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
 
 $artifacts = Join-Path $RepoRoot "artifacts"
-New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
+if (Test-Path $artifacts) { Remove-Item -Path $artifacts -Recurse -Force }
+New-Item -ItemType Directory -Path $artifacts | Out-Null
 
 Write-Host "[agent-rdp] Staging build outputs into $artifacts ..."
 Get-ChildItem -Path $buildDir -Recurse -Include "agent-rdp-bridge.exe", "agent-rdp-client.dll" -ErrorAction SilentlyContinue |
