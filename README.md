@@ -27,13 +27,15 @@ Building from source has its own toolchain requirements — see [Build](#build).
 
 ## Install
 
-This is not a pure-Python tool: the launcher drives three native binaries — `wfreerdp.exe` (FreeRDP's Windows client) plus this repo's own `agent-rdp-client.dll` and `agent-rdp-bridge.exe`, both compiled from C++. Use a [pre-built release](#pre-built-release) for a self-contained installation, or [build the complete application from source](#build).
+This is not a pure-Python tool: the launcher drives three native binaries — `wfreerdp.exe` (FreeRDP's Windows client) plus this repo's own `agent-rdp-client.dll` and `agent-rdp-bridge.exe`, both compiled from C++. Until the first complete release asset is published, [build the complete application from source](#build).
 
-### Pre-built release
+### Pre-built release (pending)
 
-Every tag push (`v*.*.*`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml). Maintainers can also run that workflow manually and supply a semantic release tag. The workflow builds `agent-rdp-client.dll` and `agent-rdp-bridge.exe`, bundles `wfreerdp.exe`, freezes the launcher into a standalone `agent-rdp.exe` (via PyInstaller — no separate Python install required), and publishes the complete ZIP and its `.sha256.txt` checksum to [Releases](https://github.com/Hubert-Rybak/agent-rdp/releases).
+The `v0.1.0` GitHub release record currently has no downloadable application assets, so it is **not an installation method yet**. Publication of the complete ZIP is pending the corrected release workflow reaching the default branch and being run. Do not use the automatically generated source archives: they do not contain the built native binaries.
 
-To install, download `agent-rdp-<version>-x64.zip` from the desired release, verify it against the accompanying checksum, extract it, and add the extracted directory to `PATH`. The `agent-rdp` command is then ready to use with all required components included.
+Every semantic-version tag push (`v<major>.<minor>.<patch>`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml). Maintainers can also run that workflow manually; it builds `agent-rdp-client.dll` and `agent-rdp-bridge.exe`, bundles `wfreerdp.exe` and its runtime DLLs, freezes the launcher into `agent-rdp.exe`, and publishes the complete ZIP and SHA-256 checksum. A manual run repairs an existing asset-less release such as `v0.1.0`, or creates a new release from the default branch when its tag does not exist.
+
+Once a release lists both `agent-rdp-v<version>-x64.zip` and `agent-rdp-v<version>-x64.zip.sha256.txt`, download both, verify the ZIP, extract it, and add the extracted directory to `PATH`. The ZIP must contain `agent-rdp.exe`, `agent-rdp-client.dll`, `agent-rdp-bridge.exe`, `wfreerdp.exe`, and the required runtime DLLs.
 
 ### From source
 
@@ -41,7 +43,7 @@ See [Build](#build).
 
 ## Usage
 
-> These examples assume `agent-rdp` is on your `PATH`, as described under [Pre-built release](#pre-built-release). **Running a complete source build instead?** Use `python src/launcher/agent_rdp.py` in place of `agent-rdp` in every example below — same arguments, same behavior.
+> These examples use `agent-rdp` for readability. With the currently available complete source build, use `python src/launcher/agent_rdp.py` in its place — same arguments and behavior.
 
 ```powershell
 # Login shell: PowerShell (default)

@@ -99,14 +99,27 @@ Write-Host "[agent-rdp] Locating wfreerdp.exe from the vcpkg install ..."
 $wfreerdp = Get-ChildItem -Path $installedDir -Recurse -Filter "wfreerdp.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($wfreerdp) {
     Copy-Item -Path $wfreerdp.FullName -Destination $artifacts -Force
-    # Pull in DLLs from the same directory (FreeRDP/WinPR/OpenSSL/etc runtime deps).
-    Get-ChildItem -Path $wfreerdp.DirectoryName -Filter "*.dll" -ErrorAction SilentlyContinue |
-        Copy-Item -Destination $artifacts -Force
+    # vcpkg commonly installs wfreerdp under tools/freerdp while placing its
+    # FreeRDP, WinPR, OpenSSL, and other runtime DLLs under bin.
+    @($wfreerdp.DirectoryName, (Join-Path $installedDir "bin")) |
+        Select-Object -Unique |
+        ForEach-Object {
+            Get-ChildItem -Path $_ -Filter "*.dll" -File -ErrorAction SilentlyContinue |
+                Copy-Item -Destination $artifacts -Force
+        }
     Write-Host "[agent-rdp] Staged wfreerdp.exe -> $artifacts"
 } else {
-    Write-Warning ("wfreerdp.exe not found under $installedDir. The 'client' feature may not have produced a " + `
-        "standalone client binary in this FreeRDP version/triplet -- locate it manually and pass --wfreerdp " + `
-        "to src/launcher/agent_rdp.py, or check the vcpkg port's install layout.")
+    throw "wfreerdp.exe not found under $installedDir; cannot produce a runnable application"
+}
+
+$requiredArtifacts = @("agent-rdp-bridge.exe", "agent-rdp-client.dll", "wfreerdp.exe")
+foreach ($requiredArtifact in $requiredArtifacts) {
+    if (-not (Test-Path (Join-Path $artifacts $requiredArtifact) -PathType Leaf)) {
+        throw "Required artifact was not staged: $requiredArtifact"
+    }
+}
+if (-not (Get-ChildItem -Path $artifacts -Filter "*.dll" -File | Where-Object Name -ne "agent-rdp-client.dll")) {
+    throw "No FreeRDP/runtime DLLs were staged; cannot produce a runnable application"
 }
 
 Write-Host ""
