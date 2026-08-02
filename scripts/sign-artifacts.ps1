@@ -25,7 +25,10 @@ param(
     [string]$TimestampUrl = "http://timestamp.digicert.com",
 
     # Intended only for isolated CI smoke tests; release signing must remain timestamped.
-    [switch]$SkipTimestamp
+    [switch]$SkipTimestamp,
+
+    [ValidateRange(1, 3600)]
+    [int]$SignToolTimeoutSeconds = 120
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,8 +42,8 @@ function Find-SignTool {
 
     $kitsRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
     if (Test-Path $kitsRoot) {
-        $candidate = Get-ChildItem -Path $kitsRoot -Recurse -File -Filter "signtool.exe" -ErrorAction SilentlyContinue |
-            Where-Object { $_.Directory.Name -eq "x64" } |
+        $signToolPattern = Join-Path $kitsRoot "*\x64\signtool.exe"
+        $candidate = Get-ChildItem -Path $signToolPattern -File -ErrorAction SilentlyContinue |
             Sort-Object -Property FullName -Descending |
             Select-Object -First 1
         if ($candidate) {
@@ -49,6 +52,56 @@ function Find-SignTool {
     }
 
     throw "signtool.exe was not found on PATH or in the Windows 10 SDK"
+}
+
+function Invoke-SignTool {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SignToolPath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Operation
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $SignToolPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    foreach ($argument in $Arguments) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw "signtool could not start while attempting to $Operation"
+        }
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try {
+                $process.Kill($true)
+            }
+            catch {
+                throw "signtool timed out and its process tree could not be terminated while attempting to $Operation`: $($_.Exception.Message)"
+            }
+            if (-not $process.WaitForExit(10000)) {
+                throw "signtool timed out and did not terminate within 10 additional seconds while attempting to $Operation"
+            }
+            throw "signtool timed out after $TimeoutSeconds second(s) while attempting to $Operation"
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "signtool exited with code $($process.ExitCode) while attempting to $Operation"
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
 }
 
 if (-not (Test-Path $CertificatePath -PathType Leaf)) {
@@ -72,20 +125,70 @@ if ($peFiles.Count -eq 0) {
 }
 
 $signTool = Find-SignTool
-$securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-$password = $null
+$securePassword = $null
 $importedCertificates = @()
-$existingCertificateThumbprints = @(
-    Get-ChildItem -Path "Cert:\CurrentUser\My" | ForEach-Object { $_.Thumbprint }
-)
+$inspectedCertificates = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+$expectedCertificateThumbprints = @()
+$existingCertificateThumbprints = @()
+$operationError = $null
+$cleanupErrors = [System.Collections.Generic.List[string]]::new()
+$storeMutex = $null
+$mutexHeld = $false
+$importAttempted = $false
 
 try {
+    $currentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $mutexName = "Local\agent-rdp-signing-$($currentUserSid.Replace('-', '_'))"
+    $storeMutex = [System.Threading.Mutex]::new($false, $mutexName)
+    try {
+        $mutexHeld = $storeMutex.WaitOne(30000)
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # An abandoned mutex is granted to this thread; continue while recording ownership.
+        $mutexHeld = $true
+    }
+    if (-not $mutexHeld) {
+        throw "Timed out waiting for exclusive access to the CurrentUser certificate store"
+    }
+
+    $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+    $existingCertificateThumbprints = @(
+        Get-ChildItem -Path "Cert:\CurrentUser\My" | ForEach-Object { $_.Thumbprint }
+    )
+
+    $ephemeralKeySet = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+    $inspectedCertificates.Import($CertificatePath, $password, $ephemeralKeySet)
+    $expectedCertificateThumbprints = @(
+        $inspectedCertificates |
+            ForEach-Object { $_.Thumbprint } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Sort-Object -Unique
+    )
+    $overlappingThumbprints = @(
+        $expectedCertificateThumbprints |
+            Where-Object { $existingCertificateThumbprints -contains $_ }
+    )
+    if ($overlappingThumbprints.Count -gt 0) {
+        throw "A certificate from the PFX already exists in Cert:\CurrentUser\My; refusing to mutate pre-existing certificate state"
+    }
+
+    $lateOverlappingThumbprints = @(
+        Get-ChildItem -Path "Cert:\CurrentUser\My" |
+            Where-Object { $expectedCertificateThumbprints -contains $_.Thumbprint } |
+            ForEach-Object { $_.Thumbprint }
+    )
+    if ($lateOverlappingThumbprints.Count -gt 0) {
+        throw "The CurrentUser certificate store changed while the PFX was being inspected; refusing the import"
+    }
+    $password = $null
+
     $importParameters = @{
         FilePath          = $CertificatePath
         CertStoreLocation = "Cert:\CurrentUser\My"
         Password          = $securePassword
         Exportable        = $false
     }
+    $importAttempted = $true
     $importedCertificates = @(Import-PfxCertificate @importParameters)
 
     $codeSigningOid = "1.3.6.1.5.5.7.3.3"
@@ -119,30 +222,111 @@ try {
             "/du", "https://github.com/Hubert-Rybak/agent-rdp",
             $file.FullName
         )
-        & $signTool @signArguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "signtool failed to sign $($file.FullName)"
-        }
+        Invoke-SignTool `
+            -SignToolPath $signTool `
+            -Arguments $signArguments `
+            -TimeoutSeconds $SignToolTimeoutSeconds `
+            -Operation "sign $($file.FullName)"
 
-        & $signTool "verify" "/pa" "/all" $file.FullName
-        if ($LASTEXITCODE -ne 0) {
-            throw "signtool could not verify $($file.FullName)"
+        $verifyArguments = @("verify", "/pa", "/all", $file.FullName)
+        Invoke-SignTool `
+            -SignToolPath $signTool `
+            -Arguments $verifyArguments `
+            -TimeoutSeconds $SignToolTimeoutSeconds `
+            -Operation "verify $($file.FullName)"
+
+        $signature = Get-AuthenticodeSignature -FilePath $file.FullName
+        if ($signature.Status -ne "Valid") {
+            throw "Authenticode status for $($file.FullName) is $($signature.Status), not Valid"
+        }
+        if (
+            -not $signature.SignerCertificate -or
+            $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint
+        ) {
+            throw "Authenticode signer thumbprint does not match the imported code-signing certificate for $($file.FullName)"
+        }
+        if (-not $SkipTimestamp -and -not $signature.TimeStamperCertificate) {
+            throw "Authenticode signature for $($file.FullName) does not contain an RFC 3161 timestamp"
         }
     }
-
-    Write-Host "[agent-rdp] Signed and verified $($peFiles.Count) PE artifact(s)."
+}
+catch {
+    $operationError = $_
 }
 finally {
-    foreach ($certificate in $importedCertificates) {
-        $storePath = "Cert:\CurrentUser\My\$($certificate.Thumbprint)"
-        if (
-            $existingCertificateThumbprints -notcontains $certificate.Thumbprint -and
-            (Test-Path $storePath)
-        ) {
-            Remove-Item -Path $storePath -Force
+    $password = $null
+    try {
+        foreach ($inspectedCertificate in $inspectedCertificates) {
+            try {
+                $inspectedCertificate.Dispose()
+            }
+            catch {
+                [void]$cleanupErrors.Add("Could not dispose an inspected certificate: $($_.Exception.Message)")
+            }
+        }
+
+        foreach ($thumbprint in $expectedCertificateThumbprints) {
+            if ($importAttempted -and $existingCertificateThumbprints -notcontains $thumbprint) {
+                try {
+                    $storePath = "Cert:\CurrentUser\My\$thumbprint"
+                    if (Test-Path $storePath) {
+                        Remove-Item -Path $storePath -DeleteKey -Force
+                    }
+                }
+                catch {
+                    [void]$cleanupErrors.Add("Could not remove imported certificate $thumbprint and its private key: $($_.Exception.Message)")
+                }
+            }
+        }
+
+        foreach ($importedCertificate in $importedCertificates) {
+            try {
+                $importedCertificate.Dispose()
+            }
+            catch {
+                [void]$cleanupErrors.Add("Could not dispose imported certificate $($importedCertificate.Thumbprint): $($_.Exception.Message)")
+            }
         }
     }
-    if ($securePassword) {
-        $securePassword.Dispose()
+    catch {
+        [void]$cleanupErrors.Add("Unexpected certificate cleanup failure: $($_.Exception.Message)")
+    }
+    finally {
+        if ($securePassword) {
+            try {
+                $securePassword.Dispose()
+            }
+            catch {
+                [void]$cleanupErrors.Add("Could not dispose the signing password: $($_.Exception.Message)")
+            }
+        }
+        if ($mutexHeld -and $storeMutex) {
+            try {
+                $storeMutex.ReleaseMutex()
+            }
+            catch {
+                [void]$cleanupErrors.Add("Could not release the certificate-store mutex: $($_.Exception.Message)")
+            }
+        }
+        if ($storeMutex) {
+            try {
+                $storeMutex.Dispose()
+            }
+            catch {
+                [void]$cleanupErrors.Add("Could not dispose the certificate-store mutex: $($_.Exception.Message)")
+            }
+        }
     }
 }
+
+if ($operationError) {
+    if ($cleanupErrors.Count -gt 0) {
+        throw "Signing failed: $($operationError.Exception.Message). Cleanup also failed: $($cleanupErrors -join '; ')"
+    }
+    throw $operationError
+}
+if ($cleanupErrors.Count -gt 0) {
+    throw "Signing completed, but cleanup failed: $($cleanupErrors -join '; ')"
+}
+
+Write-Host "[agent-rdp] Signed and verified $($peFiles.Count) PE artifact(s)."

@@ -11,42 +11,65 @@ on:
         required: true
         default: "v0.1.0"
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+  # Never abort a partially published release; a duplicate waits for the active run.
+  cancel-in-progress: false
 
 jobs:
   build-and-release:
     name: Build and publish release
     runs-on: windows-latest
-    concurrency: release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+    timeout-minutes: 60
+    permissions:
+      contents: write # Required to create or update the GitHub Release.
     steps:
       - name: Resolve release version
         id: release
         shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          $version = if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            "${{ inputs.version }}"
+          $version = if ($env:EVENT_NAME -eq "workflow_dispatch") {
+            $env:INPUT_VERSION
           } else {
-            "${{ github.ref_name }}"
+            $env:REF_NAME
           }
           if ($version -notmatch '^v\d+\.\d+\.\d+$') {
             throw "Release version must match v<major>.<minor>.<patch>; got '$version'"
           }
           "version=$version" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.default_branch || github.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Select release commit
         id: target
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          $version = "${{ steps.release.outputs.version }}"
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+          function Set-ReleaseCheckout {
+            param([Parameter(Mandatory = $true)][string]$Ref)
+
+            git checkout --detach $Ref
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not checkout release target '$Ref'"
+            }
+          }
+
+          $version = $env:RELEASE_VERSION
+          if ($env:EVENT_NAME -eq "workflow_dispatch") {
             if (git show-ref --verify --quiet "refs/tags/$version") {
               $assetCount = gh release view $version --json assets --jq '.assets | length' 2>$null
               if ($LASTEXITCODE -eq 0 -and [int]$assetCount -eq 0) {
@@ -54,32 +77,22 @@ jobs:
                 # default-branch commit (this repairs the initial v0.1.0).
                 "replace_empty_release=true" >> $env:GITHUB_OUTPUT
               } else {
-                git checkout --detach $version
+                Set-ReleaseCheckout -Ref $version
               }
             } else {
-              git checkout --detach "origin/${{ github.event.repository.default_branch }}"
+              Set-ReleaseCheckout -Ref "origin/$env:DEFAULT_BRANCH"
             }
           }
           $sha = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { throw "Could not resolve the release commit" }
           "sha=$sha" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
       - name: Install PyInstaller
         run: pip install pyinstaller==6.21.0
-
-      - name: Cache vcpkg
-        uses: actions/cache@v4
-        with:
-          path: |
-            .vcpkg
-            vcpkg_installed
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'triplets/*.cmake') }}
-          restore-keys: |
-            vcpkg-${{ runner.os }}-
 
       - name: Build native components (plugin DLL + bridge EXE + wfreerdp)
         shell: pwsh
@@ -125,11 +138,13 @@ jobs:
 
       - name: Sign Windows artifacts
         if: steps.signing.outputs.configured == 'true'
+        timeout-minutes: 10
         shell: pwsh
         env:
           WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+          CERTIFICATE_PATH: ${{ steps.signing.outputs.certificate_path }}
         run: |
-          ./scripts/sign-artifacts.ps1 -CertificatePath "${{ steps.signing.outputs.certificate_path }}" -ArtifactsDirectory "artifacts"
+          ./scripts/sign-artifacts.ps1 -CertificatePath $env:CERTIFICATE_PATH -ArtifactsDirectory "artifacts"
 
       - name: Remove temporary signing certificate
         if: always()
@@ -143,8 +158,10 @@ jobs:
       - name: Package release zip
         id: package
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          $version = "${{ steps.release.outputs.version }}"
+          $version = $env:RELEASE_VERSION
           $zipName = "agent-rdp-$version-x64.zip"
           $required = @("agent-rdp.exe", "agent-rdp-client.dll", "agent-rdp-bridge.exe", "wfreerdp.exe")
           foreach ($file in $required) {
@@ -164,10 +181,14 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          ZIP_NAME: ${{ steps.package.outputs.zip_name }}
+          REPLACE_EMPTY_RELEASE: ${{ steps.target.outputs.replace_empty_release }}
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
         run: |
-          $version = "${{ steps.release.outputs.version }}"
-          $assets = @("${{ steps.package.outputs.zip_name }}", "${{ steps.package.outputs.zip_name }}.sha256.txt")
-          if ("${{ steps.target.outputs.replace_empty_release }}" -eq "true") {
+          $version = $env:RELEASE_VERSION
+          $assets = @($env:ZIP_NAME, "$($env:ZIP_NAME).sha256.txt")
+          if ($env:REPLACE_EMPTY_RELEASE -eq "true") {
             gh release delete $version --cleanup-tag --yes
             if ($LASTEXITCODE -ne 0) { throw "Could not remove incomplete release $version" }
           }
@@ -175,14 +196,19 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $version @assets --clobber
           } else {
-            gh release create $version @assets --target "${{ steps.target.outputs.sha }}" --title $version --generate-notes
+            gh release create $version @assets --target $env:TARGET_SHA --title $version --generate-notes
           }
           if ($LASTEXITCODE -ne 0) { throw "Publishing release $version failed" }
 
       - name: Print winget manifest update reminder
         shell: pwsh
+        env:
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          ZIP_NAME: ${{ steps.package.outputs.zip_name }}
+          ZIP_SHA256: ${{ steps.package.outputs.sha256 }}
         run: |
           Write-Host "Release published. Update the matching winget manifest version."
-          Write-Host "  Release tag:    ${{ steps.release.outputs.version }}"
-          Write-Host "  InstallerUrl:   https://github.com/${{ github.repository }}/releases/download/${{ steps.release.outputs.version }}/${{ steps.package.outputs.zip_name }}"
-          Write-Host "  InstallerSha256: ${{ steps.package.outputs.sha256 }}"
+          Write-Host "  Release tag:    $env:RELEASE_VERSION"
+          Write-Host "  InstallerUrl:   https://github.com/$env:REPOSITORY/releases/download/$env:RELEASE_VERSION/$env:ZIP_NAME"
+          Write-Host "  InstallerSha256: $env:ZIP_SHA256"

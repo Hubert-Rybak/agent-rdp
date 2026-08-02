@@ -1,10 +1,11 @@
+import re
 from pathlib import Path
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SIGNING_SCRIPT = REPO_ROOT / "scripts" / "sign-artifacts.ps1"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+DEPENDABOT_CONFIG = REPO_ROOT / ".github" / "dependabot.yml"
 
 
 def test_signing_script_uses_sha256_rfc3161_and_environment_password():
@@ -18,9 +19,34 @@ def test_signing_script_uses_sha256_rfc3161_and_environment_password():
     assert 'Get-ChildItem -Path $ArtifactsDirectory -Recurse -File' in source
     assert '"*.exe", "*.dll"' in source
     assert "$existingCertificateThumbprints" in source
-    assert "$existingCertificateThumbprints -notcontains $certificate.Thumbprint" in source
+    assert "$existingCertificateThumbprints -notcontains $thumbprint" in source
     assert "[switch]$SkipTimestamp" in source
     assert "if (-not $SkipTimestamp)" in source
+    assert "[int]$SignToolTimeoutSeconds = 120" in source
+    assert "function Invoke-SignTool" in source
+    assert "$process.Kill($true)" in source
+    assert "$process.WaitForExit(10000)" in source
+    assert "$process.WaitForExit()" not in source
+    assert "TimeStamperCertificate" in source
+    assert "SignerCertificate.Thumbprint" in source
+    assert "-DeleteKey" in source
+    assert "EphemeralKeySet" in source
+    assert "already exists in Cert:\\CurrentUser\\My" in source
+    assert "changed while the PFX was being inspected" in source
+    assert "System.Threading.Mutex" in source
+    assert "$expectedCertificateThumbprints" in source
+    assert "$cleanupErrors" in source
+    assert "$importedCertificate.Dispose()" in source
+
+
+def test_sign_tool_discovery_does_not_recursively_scan_the_windows_sdk():
+    source = SIGNING_SCRIPT.read_text(encoding="utf-8")
+    find_start = source.index("function Find-SignTool")
+    find_end = source.index("if (-not (Test-Path $CertificatePath")
+    find_function = source[find_start:find_end]
+
+    assert "-Recurse" not in find_function
+    assert '"*\\x64\\signtool.exe"' in find_function
 
 
 def test_release_workflow_pins_pyinstaller_version():
@@ -51,6 +77,80 @@ def test_release_workflow_always_removes_temporary_certificate():
     assert 'Join-Path $env:RUNNER_TEMP "agent-rdp-signing.pfx"' in cleanup_step
 
 
+def _powershell_run_blocks(path: Path):
+    lines = path.read_text(encoding="utf-8").splitlines()
+    blocks = []
+    for index, line in enumerate(lines):
+        if line.strip() != "run: |":
+            continue
+        indentation = len(line) - len(line.lstrip())
+        block = []
+        for candidate in lines[index + 1 :]:
+            if candidate.strip() and len(candidate) - len(candidate.lstrip()) <= indentation:
+                break
+            block.append(candidate)
+        blocks.append("\n".join(block))
+    return blocks
+
+
+def test_github_actions_are_pinned_and_checkout_does_not_persist_credentials():
+    for workflow_path in (CI_WORKFLOW, RELEASE_WORKFLOW):
+        workflow = workflow_path.read_text(encoding="utf-8")
+        action_references = re.findall(
+            r"^\s*(?:-\s+)?uses:\s+(?!\./)[^@\s]+@([^\s#]+)", workflow, re.MULTILINE
+        )
+
+        assert action_references
+        assert all(re.fullmatch(r"[0-9a-f]{40}", reference) for reference in action_references)
+        assert workflow.count("persist-credentials: false") >= workflow.count("actions/checkout@")
+
+
+def test_pinned_github_actions_have_dependabot_maintenance():
+    config = DEPENDABOT_CONFIG.read_text(encoding="utf-8")
+
+    assert 'package-ecosystem: "github-actions"' in config
+    assert 'directory: "/"' in config
+    assert 'interval: "weekly"' in config
+
+
+def test_ci_is_least_privilege_deduplicated_and_concurrent_runs_are_bounded():
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    python_job = workflow[
+        workflow.index("  python-check:") : workflow.index("  windows-build:")
+    ]
+
+    assert "permissions:\n  contents: read" in workflow
+    assert 'branches: ["master"]' in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "timeout-minutes: 5" in python_job
+    assert "timeout-minutes: 45" in workflow
+
+
+def test_release_powershell_avoids_direct_github_template_interpolation():
+    for run_block in _powershell_run_blocks(RELEASE_WORKFLOW):
+        assert "${{" not in run_block
+
+
+def test_release_checkout_failures_are_checked_immediately():
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "function Set-ReleaseCheckout" in workflow
+    assert "git checkout --detach $Ref" in workflow
+    assert 'throw "Could not checkout release target' in workflow
+
+
+def test_release_signing_is_bounded_and_runtime_cache_is_avoided():
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    signing_start = workflow.index("- name: Sign Windows artifacts")
+    cleanup_start = workflow.index("- name: Remove temporary signing certificate")
+    signing_step = workflow[signing_start:cleanup_start]
+
+    assert "timeout-minutes: 10" in signing_step
+    assert "actions/cache@" not in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "timeout-minutes: 60" in workflow
+
+
 def test_ci_smoke_tests_authenticode_signing_helper():
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
 
@@ -59,4 +159,7 @@ def test_ci_smoke_tests_authenticode_signing_helper():
     assert "New-SelfSignedCertificate" in workflow
     assert "./scripts/sign-artifacts.ps1" in workflow
     assert "-SkipTimestamp" in workflow
+    assert "Signing helper left its imported certificate" in workflow
+    assert "name: agent-rdp-windows-build-unsigned" in workflow
+    assert "retention-days: 7" in workflow
     assert "if-no-files-found: error" in workflow

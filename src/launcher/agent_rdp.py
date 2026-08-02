@@ -30,7 +30,7 @@ import tempfile
 import textwrap
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 if os.name != "nt":
@@ -1039,20 +1039,28 @@ def validate_args(args, p, *, multi: bool):
         p.error("--save-credential requires --credential-target NAME")
 
 
-def main():
-    set_binary_mode()
-    p = parser()
-    args = p.parse_args()
-
+def warn_security_overrides(args):
     if args.cert_ignore:
         print(
             "agent-rdp: WARNING: --insecure-cert-ignore disables RDP server certificate validation.",
             file=sys.stderr,
         )
+    if args.powershell_execution_policy == "bypass":
+        print(
+            "agent-rdp: WARNING: --powershell-execution-policy bypass overrides the target PowerShell execution policy.",
+            file=sys.stderr,
+        )
+
+
+def main():
+    set_binary_mode()
+    p = parser()
+    args = p.parse_args()
 
     targets = resolve_targets(args, p)
     multi = len(targets) > 1
     validate_args(args, p, multi=multi)
+    warn_security_overrides(args)
 
     # Validate local components once, before any (possibly concurrent) connect.
     ensure_plugin(args.plugin_dir, args.plugin_name)
