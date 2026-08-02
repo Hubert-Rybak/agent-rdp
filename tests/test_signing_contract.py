@@ -19,6 +19,8 @@ def test_signing_script_uses_sha256_rfc3161_and_environment_password():
     assert '"*.exe", "*.dll"' in source
     assert "$existingCertificateThumbprints" in source
     assert "$existingCertificateThumbprints -notcontains $certificate.Thumbprint" in source
+    assert "[switch]$SkipTimestamp" in source
+    assert "if (-not $SkipTimestamp)" in source
 
 
 def test_release_workflow_pins_pyinstaller_version():
@@ -36,6 +38,8 @@ def test_release_workflow_signs_after_freezing_and_before_packaging():
     sign = workflow.index("- name: Sign Windows artifacts")
     package = workflow.index("- name: Package release zip")
     assert freeze < sign < package
+    release_signing_step = workflow[sign:package].lower()
+    assert "-skiptimestamp" not in release_signing_step
 
 
 def test_release_workflow_always_removes_temporary_certificate():
@@ -51,6 +55,8 @@ def test_ci_smoke_tests_authenticode_signing_helper():
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
 
     assert "- name: Smoke-test Authenticode signing helper" in workflow
+    assert "timeout-minutes: 5" in workflow
     assert "New-SelfSignedCertificate" in workflow
     assert "./scripts/sign-artifacts.ps1" in workflow
+    assert "-SkipTimestamp" in workflow
     assert "if-no-files-found: error" in workflow

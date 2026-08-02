@@ -5,8 +5,10 @@
 
 .DESCRIPTION
     Imports a PFX into the ephemeral CurrentUser certificate store, signs all
-    PE artifacts with SHA-256 and an RFC 3161 timestamp, verifies every
-    signature, and removes all imported certificates in a finally block.
+    PE artifacts with SHA-256 and an RFC 3161 timestamp by default, verifies
+    every signature, and removes all imported certificates in a finally block.
+    The test-only SkipTimestamp switch omits the external timestamp request for
+    isolated CI smoke tests; production release signing does not use it.
     The PFX password is read from an environment variable and is never accepted
     as a command-line argument.
 #>
@@ -20,7 +22,10 @@ param(
     [string]$CertificatePasswordEnvironmentVariable = "WINDOWS_SIGNING_CERTIFICATE_PASSWORD",
 
     [ValidatePattern("^https?://")]
-    [string]$TimestampUrl = "http://timestamp.digicert.com"
+    [string]$TimestampUrl = "http://timestamp.digicert.com",
+
+    # Intended only for isolated CI smoke tests; release signing must remain timestamped.
+    [switch]$SkipTimestamp
 )
 
 $ErrorActionPreference = "Stop"
@@ -101,9 +106,15 @@ try {
             "sign",
             "/sha1", $certificate.Thumbprint,
             "/s", "My",
-            "/fd", "SHA256",
-            "/tr", $TimestampUrl,
-            "/td", "SHA256",
+            "/fd", "SHA256"
+        )
+        if (-not $SkipTimestamp) {
+            $signArguments += @(
+                "/tr", $TimestampUrl,
+                "/td", "SHA256"
+            )
+        }
+        $signArguments += @(
             "/d", "agent-rdp",
             "/du", "https://github.com/Hubert-Rybak/agent-rdp",
             $file.FullName

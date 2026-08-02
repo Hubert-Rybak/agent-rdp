@@ -264,7 +264,7 @@ Unsigned, low-prevalence remote-administration binaries are more likely to recei
 Remove-Item Env:\WINDOWS_SIGNING_CERTIFICATE_PASSWORD
 ```
 
-The signing script reads the password from the environment rather than a command-line parameter, uses SHA-256 plus RFC 3161 timestamping, verifies every signature, and removes the imported certificate from the current-user certificate store even if signing fails.
+The signing script reads the password from the environment rather than a command-line parameter, uses SHA-256 plus RFC 3161 timestamping, verifies every signature, and removes certificates newly imported by the invocation even if signing fails. The Windows CI smoke test signs temporary copies with an ephemeral self-signed certificate and deliberately skips the external timestamp service to avoid a network-dependent hang; the release path does not use that test-only switch and remains timestamped.
 
 The release workflow enables the same step when both repository secrets are configured:
 
