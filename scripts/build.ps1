@@ -83,6 +83,7 @@ Write-Host "[agent-rdp] Configuring CMake ..."
 cmake -S $RepoRoot -B $buildDir `
     "-DCMAKE_TOOLCHAIN_FILE=$toolchainFile" `
     "-DVCPKG_TARGET_TRIPLET=$Triplet" `
+    "-DVCPKG_OVERLAY_TRIPLETS=$RepoRoot\triplets" `
     "-DCMAKE_BUILD_TYPE=$Configuration"
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 
