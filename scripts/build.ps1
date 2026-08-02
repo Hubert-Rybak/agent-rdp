@@ -21,14 +21,15 @@
     and CMake/Ninja on PATH.
 
 .PARAMETER Triplet
-    vcpkg triplet to build against. Defaults to x64-windows (MSVC, dynamic
-    CRT). Use x64-mingw-dynamic if building with mingw-w64 instead.
+    vcpkg triplet to build against. Defaults to the repository's custom
+    x64-windows-agent-rdp triplet, which enables the wfreerdp Windows client
+    disabled by the upstream vcpkg port.
 
 .PARAMETER Configuration
     CMake build configuration. Defaults to Release.
 #>
 param(
-    [string]$Triplet = "x64-windows",
+    [string]$Triplet = "x64-windows-agent-rdp",
     [string]$Configuration = "Release"
 )
 
@@ -64,7 +65,8 @@ $vcpkgExe = Join-Path $vcpkgRoot "vcpkg.exe"
 $toolchainFile = Join-Path $vcpkgRoot "scripts\buildsystems\vcpkg.cmake"
 
 Write-Host "[agent-rdp] Installing dependencies via vcpkg (triplet=$Triplet) ..."
-& $vcpkgExe install "--triplet=$Triplet" "--x-manifest-root=$RepoRoot" "--x-install-root=$RepoRoot\vcpkg_installed"
+& $vcpkgExe install "--triplet=$Triplet" "--overlay-triplets=$RepoRoot\triplets" `
+    "--x-manifest-root=$RepoRoot" "--x-install-root=$RepoRoot\vcpkg_installed"
 if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
 
 $installedDir = Join-Path $RepoRoot "vcpkg_installed\$Triplet"
@@ -81,6 +83,7 @@ Write-Host "[agent-rdp] Configuring CMake ..."
 cmake -S $RepoRoot -B $buildDir `
     "-DCMAKE_TOOLCHAIN_FILE=$toolchainFile" `
     "-DVCPKG_TARGET_TRIPLET=$Triplet" `
+    "-DVCPKG_OVERLAY_TRIPLETS=$RepoRoot\triplets" `
     "-DCMAKE_BUILD_TYPE=$Configuration"
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 
@@ -89,7 +92,8 @@ cmake --build $buildDir --config $Configuration
 if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
 
 $artifacts = Join-Path $RepoRoot "artifacts"
-New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
+if (Test-Path $artifacts) { Remove-Item -Path $artifacts -Recurse -Force }
+New-Item -ItemType Directory -Path $artifacts | Out-Null
 
 Write-Host "[agent-rdp] Staging build outputs into $artifacts ..."
 Get-ChildItem -Path $buildDir -Recurse -Include "agent-rdp-bridge.exe", "agent-rdp-client.dll" -ErrorAction SilentlyContinue |
@@ -99,14 +103,27 @@ Write-Host "[agent-rdp] Locating wfreerdp.exe from the vcpkg install ..."
 $wfreerdp = Get-ChildItem -Path $installedDir -Recurse -Filter "wfreerdp.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($wfreerdp) {
     Copy-Item -Path $wfreerdp.FullName -Destination $artifacts -Force
-    # Pull in DLLs from the same directory (FreeRDP/WinPR/OpenSSL/etc runtime deps).
-    Get-ChildItem -Path $wfreerdp.DirectoryName -Filter "*.dll" -ErrorAction SilentlyContinue |
-        Copy-Item -Destination $artifacts -Force
+    # vcpkg commonly installs wfreerdp under tools/freerdp while placing its
+    # FreeRDP, WinPR, OpenSSL, and other runtime DLLs under bin.
+    @($wfreerdp.DirectoryName, (Join-Path $installedDir "bin")) |
+        Select-Object -Unique |
+        ForEach-Object {
+            Get-ChildItem -Path $_ -Filter "*.dll" -File -ErrorAction SilentlyContinue |
+                Copy-Item -Destination $artifacts -Force
+        }
     Write-Host "[agent-rdp] Staged wfreerdp.exe -> $artifacts"
 } else {
-    Write-Warning ("wfreerdp.exe not found under $installedDir. The 'client' feature may not have produced a " + `
-        "standalone client binary in this FreeRDP version/triplet -- locate it manually and pass --wfreerdp " + `
-        "to src/launcher/agent_rdp.py, or check the vcpkg port's install layout.")
+    throw "wfreerdp.exe not found under $installedDir; cannot produce a runnable application"
+}
+
+$requiredArtifacts = @("agent-rdp-bridge.exe", "agent-rdp-client.dll", "wfreerdp.exe")
+foreach ($requiredArtifact in $requiredArtifacts) {
+    if (-not (Test-Path (Join-Path $artifacts $requiredArtifact) -PathType Leaf)) {
+        throw "Required artifact was not staged: $requiredArtifact"
+    }
+}
+if (-not (Get-ChildItem -Path $artifacts -Filter "*.dll" -File | Where-Object Name -ne "agent-rdp-client.dll")) {
+    throw "No FreeRDP/runtime DLLs were staged; cannot produce a runnable application"
 }
 
 Write-Host ""
