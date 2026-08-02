@@ -32,6 +32,12 @@ def test_signing_script_uses_sha256_rfc3161_and_environment_password():
     assert "ReadToEndAsync()" in source
     assert "signtool stdout" in source
     assert "signtool stderr" in source
+    assert "[switch]$AllowUntrustedRoot" in source
+    assert "$AllowUntrustedRoot -and" in source
+    assert '$env:GITHUB_ACTIONS -eq "true"' in source
+    assert "$signToolErrorCount -eq 1" in source
+    assert '"Number of errors:\\s*1"' in source
+    assert "-AllowUntrustedRoot:$SkipTimestamp" in source
     assert "TimeStamperCertificate" in source
     assert "SignerCertificate.Thumbprint" in source
     assert "SkipTimestamp signing already selected the certificate by thumbprint" in source
@@ -179,10 +185,8 @@ def test_ci_smoke_tests_authenticode_signing_helper():
     assert 'Oid]::new("1.3.6.1.5.5.7.3.3")' in workflow
     assert "Import-Certificate" not in workflow
     assert "certutil.exe" not in workflow
-    assert "StoreName]::TrustedPeople" not in workflow
-    assert "StoreName]::TrustedPublisher" in workflow
-    assert "$trustedPublisherStore.Add($trustedCertificate)" in workflow
-    assert "$cleanupStore.Remove($trustedPublisherCertificate)" in workflow
+    assert "X509Store" not in workflow
+    assert "StoreName]::Trusted" not in workflow
     assert "./scripts/sign-artifacts.ps1" in workflow
     assert "-SkipTimestamp" in workflow
     assert "-SignToolTimeoutSeconds 60" in workflow

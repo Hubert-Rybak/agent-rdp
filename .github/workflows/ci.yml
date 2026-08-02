@@ -82,13 +82,9 @@ jobs:
         run: |
           $temporaryDirectory = Join-Path $env:RUNNER_TEMP "agent-rdp-signing-smoke"
           $pfxPath = Join-Path $temporaryDirectory "smoke.pfx"
-          $cerPath = Join-Path $temporaryDirectory "smoke.cer"
           $artifactCopy = Join-Path $temporaryDirectory "artifacts"
           $rsa = $null
           $certificate = $null
-          $trustedCertificate = $null
-          $trustedPublisherStore = $null
-          $trustedPublisherInstalled = $false
           $thumbprint = $null
           $passwordText = [Guid]::NewGuid().ToString("N")
           New-Item -ItemType Directory -Path $artifactCopy -Force | Out-Null
@@ -125,36 +121,11 @@ jobs:
                 $passwordText
               )
             )
-            [System.IO.File]::WriteAllBytes(
-              $cerPath,
-              $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-            )
             $certificate.Dispose()
             $certificate = $null
             $rsa.Dispose()
             $rsa = $null
             Write-Host "::notice title=agent-rdp signing smoke::Exported ephemeral PFX without a source store entry"
-
-            # Trust this exact end-entity certificate without promoting it to a root CA or triggering root-store UI.
-            Write-Host "::notice title=agent-rdp signing smoke::Installing end-entity trust in TrustedPublisher"
-            $trustedCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($cerPath)
-            $trustedPublisherStore = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-              [System.Security.Cryptography.X509Certificates.StoreName]::TrustedPublisher,
-              [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-            )
-            try {
-              $trustedPublisherStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-              $trustedPublisherStore.Add($trustedCertificate)
-              $trustedPublisherInstalled = $true
-            }
-            finally {
-              $trustedPublisherStore.Close()
-              $trustedPublisherStore.Dispose()
-              $trustedPublisherStore = $null
-              $trustedCertificate.Dispose()
-              $trustedCertificate = $null
-            }
-            Write-Host "::notice title=agent-rdp signing smoke::Trusted public smoke certificate as an end entity"
 
             Copy-Item artifacts/agent-rdp-bridge.exe, artifacts/agent-rdp-client.dll -Destination $artifactCopy
             $env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD = $passwordText
@@ -174,42 +145,11 @@ jobs:
           finally {
             Remove-Item Env:\WINDOWS_SIGNING_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue
             $passwordText = $null
-            if ($trustedPublisherStore) {
-              $trustedPublisherStore.Close()
-              $trustedPublisherStore.Dispose()
-            }
-            if ($trustedCertificate) { $trustedCertificate.Dispose() }
             if ($certificate) { $certificate.Dispose() }
             if ($rsa) { $rsa.Dispose() }
             $myCertificatePath = "Cert:\CurrentUser\My\$thumbprint"
             if (Test-Path $myCertificatePath) {
               Remove-Item -Path $myCertificatePath -DeleteKey -Force
-            }
-            if ($trustedPublisherInstalled) {
-              $cleanupStore = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-                [System.Security.Cryptography.X509Certificates.StoreName]::TrustedPublisher,
-                [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-              )
-              try {
-                $cleanupStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-                $trustedPublisherCertificates = $cleanupStore.Certificates.Find(
-                  [System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
-                  $thumbprint,
-                  $false
-                )
-                foreach ($trustedPublisherCertificate in $trustedPublisherCertificates) {
-                  try {
-                    $cleanupStore.Remove($trustedPublisherCertificate)
-                  }
-                  finally {
-                    $trustedPublisherCertificate.Dispose()
-                  }
-                }
-              }
-              finally {
-                $cleanupStore.Close()
-                $cleanupStore.Dispose()
-              }
             }
             if (Test-Path $temporaryDirectory) { Remove-Item -Path $temporaryDirectory -Recurse -Force }
           }

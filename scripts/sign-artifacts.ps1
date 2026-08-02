@@ -8,9 +8,11 @@
     PE artifacts with SHA-256 and an RFC 3161 timestamp by default, verifies
     every signature, and removes all imported certificates in a finally block.
     The test-only SkipTimestamp switch omits the external timestamp request for
-    isolated CI smoke tests; production release signing does not use it.
-    The PFX password is read from an environment variable and is never accepted
-    as a command-line argument.
+    isolated GitHub Actions smoke tests and tolerates only SignTool's sole,
+    exact untrusted-root result for the ephemeral self-signed CI certificate;
+    all other verification errors still fail. Production release signing does
+    not use this switch. The PFX password is read from an environment variable
+    and is never accepted as a command-line argument.
 #>
 [CmdletBinding()]
 param(
@@ -113,7 +115,9 @@ function Invoke-SignTool {
         [int]$TimeoutSeconds,
 
         [Parameter(Mandatory = $true)]
-        [string]$Operation
+        [string]$Operation,
+
+        [switch]$AllowUntrustedRoot
     )
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -160,7 +164,25 @@ function Invoke-SignTool {
             throw "signtool timed out after $TimeoutSeconds second(s) while attempting to $Operation"
         }
         if ($process.ExitCode -ne 0) {
-            throw "signtool exited with code $($process.ExitCode) while attempting to $Operation"
+            $normalizedStandardError = ($standardError -replace "\s+", " ").Trim()
+            $expectedUntrustedRootError = "SignTool Error: A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider."
+            $signToolErrorCount = [regex]::Matches($standardError, "SignTool Error:").Count
+            $isExpectedCiTrustFailure = (
+                $AllowUntrustedRoot -and
+                $env:GITHUB_ACTIONS -eq "true" -and
+                $Arguments.Count -gt 0 -and
+                $Arguments[0] -eq "verify" -and
+                $process.ExitCode -eq 1 -and
+                $signToolErrorCount -eq 1 -and
+                $normalizedStandardError -eq $expectedUntrustedRootError -and
+                $standardOutput -match "Number of errors:\s*1"
+            )
+            if ($isExpectedCiTrustFailure) {
+                Write-SigningProgress "Accepted the expected untrusted-root result for the ephemeral CI signer"
+            }
+            else {
+                throw "signtool exited with code $($process.ExitCode) while attempting to $Operation"
+            }
         }
     }
     finally {
@@ -301,7 +323,8 @@ try {
             -SignToolPath $signTool `
             -Arguments $verifyArguments `
             -TimeoutSeconds $SignToolTimeoutSeconds `
-            -Operation "verify $($file.FullName)"
+            -Operation "verify $($file.FullName)" `
+            -AllowUntrustedRoot:$SkipTimestamp
         Write-SigningProgress "SignTool verified $($file.Name)"
 
         if ($SkipTimestamp) {
