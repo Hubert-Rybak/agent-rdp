@@ -86,7 +86,7 @@ jobs:
           $artifactCopy = Join-Path $temporaryDirectory "artifacts"
           $rsa = $null
           $certificate = $null
-          $trustedCertificate = $null
+          $rootTrustInstalled = $false
           $thumbprint = $null
           $passwordText = [Guid]::NewGuid().ToString("N")
           New-Item -ItemType Directory -Path $artifactCopy -Force | Out-Null
@@ -133,11 +133,12 @@ jobs:
             $rsa = $null
             Write-Host "::notice title=agent-rdp signing smoke::Exported ephemeral PFX without a source store entry"
 
-            $trustedCertificate = Import-Certificate `
-              -FilePath $cerPath `
-              -CertStoreLocation "Cert:\CurrentUser\Root"
-            $trustedCertificate.Dispose()
-            $trustedCertificate = $null
+            Write-Host "::notice title=agent-rdp signing smoke::Installing public smoke trust non-interactively"
+            & certutil.exe -user -f -addstore Root $cerPath | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+              throw "certutil failed to trust the smoke certificate (exit $LASTEXITCODE)"
+            }
+            $rootTrustInstalled = $true
             Write-Host "::notice title=agent-rdp signing smoke::Trusted public smoke certificate"
 
             Copy-Item artifacts/agent-rdp-bridge.exe, artifacts/agent-rdp-client.dll -Destination $artifactCopy
@@ -158,17 +159,16 @@ jobs:
           finally {
             Remove-Item Env:\WINDOWS_SIGNING_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue
             $passwordText = $null
-            if ($trustedCertificate) { $trustedCertificate.Dispose() }
             if ($certificate) { $certificate.Dispose() }
             if ($rsa) { $rsa.Dispose() }
-            foreach ($store in @("My", "Root")) {
-              $certificatePath = "Cert:\CurrentUser\$store\$thumbprint"
-              if (Test-Path $certificatePath) {
-                if ($store -eq "My") {
-                  Remove-Item -Path $certificatePath -DeleteKey -Force
-                } else {
-                  Remove-Item -Path $certificatePath -Force
-                }
+            $myCertificatePath = "Cert:\CurrentUser\My\$thumbprint"
+            if (Test-Path $myCertificatePath) {
+              Remove-Item -Path $myCertificatePath -DeleteKey -Force
+            }
+            if ($rootTrustInstalled) {
+              & certutil.exe -user -delstore Root $thumbprint | Out-Host
+              if ($LASTEXITCODE -ne 0) {
+                throw "certutil failed to remove the smoke trust certificate (exit $LASTEXITCODE)"
               }
             }
             if (Test-Path $temporaryDirectory) { Remove-Item -Path $temporaryDirectory -Recurse -Force }

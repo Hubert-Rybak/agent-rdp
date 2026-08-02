@@ -37,6 +37,8 @@ def test_signing_script_uses_sha256_rfc3161_and_environment_password():
     assert "System.Threading.Mutex" in source
     assert "$expectedCertificateThumbprints" in source
     assert "$cleanupErrors" in source
+    assert "function Write-SigningProgress" in source
+    assert "::notice title=agent-rdp signing helper::" in source
     assert "$importedCertificate.Dispose()" in source
     assert source.index("foreach ($importedCertificate in $importedCertificates)") < source.index(
         "foreach ($thumbprint in $expectedCertificateThumbprints)"
@@ -166,8 +168,9 @@ def test_ci_smoke_tests_authenticode_signing_helper():
     assert "X509ContentType]::Pfx" in workflow
     assert "X509EnhancedKeyUsageExtension" in workflow
     assert 'Oid]::new("1.3.6.1.5.5.7.3.3")' in workflow
-    assert "Import-Certificate" in workflow
-    assert "Cert:\\CurrentUser\\Root" in workflow
+    assert "Import-Certificate" not in workflow
+    assert "certutil.exe -user -f -addstore Root" in workflow
+    assert "certutil.exe -user -delstore Root" in workflow
     assert "./scripts/sign-artifacts.ps1" in workflow
     assert "-SkipTimestamp" in workflow
     assert "-SignToolTimeoutSeconds 60" in workflow

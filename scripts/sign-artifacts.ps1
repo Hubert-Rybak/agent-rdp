@@ -34,6 +34,19 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+function Write-SigningProgress {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    Write-Host "[agent-rdp] $Message"
+    if ($env:GITHUB_ACTIONS -eq "true") {
+        $githubMessage = $Message.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+        Write-Host "::notice title=agent-rdp signing helper::$githubMessage"
+    }
+}
+
 function Find-SignTool {
     $command = Get-Command "signtool.exe" -ErrorAction SilentlyContinue
     if ($command) {
@@ -125,6 +138,7 @@ if ($peFiles.Count -eq 0) {
 }
 
 $signTool = Find-SignTool
+Write-SigningProgress "Resolved SignTool"
 $securePassword = $null
 $importedCertificates = @()
 $inspectedCertificates = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
@@ -150,6 +164,7 @@ try {
     if (-not $mutexHeld) {
         throw "Timed out waiting for exclusive access to the CurrentUser certificate store"
     }
+    Write-SigningProgress "Acquired certificate-store mutex"
 
     $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
     $existingCertificateThumbprints = @(
@@ -181,7 +196,9 @@ try {
         throw "The CurrentUser certificate store changed while the PFX was being inspected; refusing the import"
     }
     $password = $null
+    Write-SigningProgress "Completed PFX and certificate-store preflight"
 
+    Write-SigningProgress "Importing PFX into CurrentUser certificate store"
     $importParameters = @{
         FilePath          = $CertificatePath
         CertStoreLocation = "Cert:\CurrentUser\My"
@@ -190,6 +207,7 @@ try {
     }
     $importAttempted = $true
     $importedCertificates = @(Import-PfxCertificate @importParameters)
+    Write-SigningProgress "Imported PFX into CurrentUser certificate store"
 
     $codeSigningOid = "1.3.6.1.5.5.7.3.3"
     $signingCertificates = @(
@@ -234,6 +252,7 @@ try {
             -Arguments $verifyArguments `
             -TimeoutSeconds $SignToolTimeoutSeconds `
             -Operation "verify $($file.FullName)"
+        Write-SigningProgress "SignTool verified $($file.Name)"
 
         if ($SkipTimestamp) {
             # SkipTimestamp signing already selected the certificate by thumbprint and SignTool verification succeeded.
