@@ -160,15 +160,20 @@ def test_ci_smoke_tests_authenticode_signing_helper():
 
     assert "- name: Smoke-test Authenticode signing helper" in workflow
     assert "timeout-minutes: 5" in workflow
-    assert "New-SelfSignedCertificate" in workflow
+    assert "New-SelfSignedCertificate" not in workflow
+    assert "CertificateRequest" in workflow
+    assert "CreateSelfSigned" in workflow
+    assert "X509ContentType]::Pfx" in workflow
+    assert "X509EnhancedKeyUsageExtension" in workflow
+    assert 'Oid]::new("1.3.6.1.5.5.7.3.3")' in workflow
+    assert "Import-Certificate" in workflow
+    assert "Cert:\\CurrentUser\\Root" in workflow
     assert "./scripts/sign-artifacts.ps1" in workflow
     assert "-SkipTimestamp" in workflow
     assert "-SignToolTimeoutSeconds 60" in workflow
     assert "Get-AuthenticodeSignature" not in workflow
     assert "$certificate.Dispose()" in workflow
-    assert workflow.index("$certificate.Dispose()") < workflow.index(
-        "Remove-Item -LiteralPath $certificateStorePath -DeleteKey"
-    )
+    assert "$rsa.Dispose()" in workflow
     assert "Signing helper left its imported certificate" in workflow
     assert "name: agent-rdp-windows-build-unsigned" in workflow
     assert "retention-days: 7" in workflow

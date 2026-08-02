@@ -84,29 +84,61 @@ jobs:
           $pfxPath = Join-Path $temporaryDirectory "smoke.pfx"
           $cerPath = Join-Path $temporaryDirectory "smoke.cer"
           $artifactCopy = Join-Path $temporaryDirectory "artifacts"
+          $rsa = $null
           $certificate = $null
+          $trustedCertificate = $null
           $thumbprint = $null
           $passwordText = [Guid]::NewGuid().ToString("N")
-          $securePassword = ConvertTo-SecureString $passwordText -AsPlainText -Force
           New-Item -ItemType Directory -Path $artifactCopy -Force | Out-Null
 
-          Write-Host "::notice title=agent-rdp signing smoke::Preparing ephemeral signing certificate"
-          $certificate = New-SelfSignedCertificate `
-            -Type CodeSigningCert `
-            -Subject "CN=agent-rdp CI signing smoke" `
-            -CertStoreLocation "Cert:\CurrentUser\My" `
-            -KeyExportPolicy Exportable `
-            -NotAfter (Get-Date).AddDays(1)
-          $thumbprint = $certificate.Thumbprint
-          $certificateStorePath = "Cert:\CurrentUser\My\$thumbprint"
-
           try {
-            Export-PfxCertificate -Cert $certificate -FilePath $pfxPath -Password $securePassword | Out-Null
-            Export-Certificate -Cert $certificate -FilePath $cerPath | Out-Null
-            Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+            Write-Host "::notice title=agent-rdp signing smoke::Generating in-memory signing certificate"
+            $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+            $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+              "CN=agent-rdp CI signing smoke",
+              $rsa,
+              [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+              [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+            )
+            $ekuOids = [System.Security.Cryptography.OidCollection]::new()
+            [void]$ekuOids.Add([System.Security.Cryptography.Oid]::new("1.3.6.1.5.5.7.3.3"))
+            [void]$request.CertificateExtensions.Add(
+              [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($ekuOids, $false)
+            )
+            [void]$request.CertificateExtensions.Add(
+              [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new(
+                [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature,
+                $true
+              )
+            )
+            $certificate = $request.CreateSelfSigned(
+              [DateTimeOffset]::UtcNow.AddMinutes(-5),
+              [DateTimeOffset]::UtcNow.AddDays(1)
+            )
+            $thumbprint = $certificate.Thumbprint
+            [System.IO.File]::WriteAllBytes(
+              $pfxPath,
+              $certificate.Export(
+                [System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,
+                $passwordText
+              )
+            )
+            [System.IO.File]::WriteAllBytes(
+              $cerPath,
+              $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+            )
             $certificate.Dispose()
             $certificate = $null
-            Remove-Item -LiteralPath $certificateStorePath -DeleteKey -Force
+            $rsa.Dispose()
+            $rsa = $null
+            Write-Host "::notice title=agent-rdp signing smoke::Exported ephemeral PFX without a source store entry"
+
+            $trustedCertificate = Import-Certificate `
+              -FilePath $cerPath `
+              -CertStoreLocation "Cert:\CurrentUser\Root"
+            $trustedCertificate.Dispose()
+            $trustedCertificate = $null
+            Write-Host "::notice title=agent-rdp signing smoke::Trusted public smoke certificate"
 
             Copy-Item artifacts/agent-rdp-bridge.exe, artifacts/agent-rdp-client.dll -Destination $artifactCopy
             $env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD = $passwordText
@@ -126,11 +158,9 @@ jobs:
           finally {
             Remove-Item Env:\WINDOWS_SIGNING_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue
             $passwordText = $null
-            if ($securePassword) { $securePassword.Dispose() }
-            if ($certificate) {
-              $certificate.Dispose()
-              $certificate = $null
-            }
+            if ($trustedCertificate) { $trustedCertificate.Dispose() }
+            if ($certificate) { $certificate.Dispose() }
+            if ($rsa) { $rsa.Dispose() }
             foreach ($store in @("My", "Root")) {
               $certificatePath = "Cert:\CurrentUser\$store\$thumbprint"
               if (Test-Path $certificatePath) {
