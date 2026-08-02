@@ -143,24 +143,56 @@ Resolution order: `-P/--password` → `RDP_PASSWORD` → `--credential-target` (
 
 ## Architecture
 
-```
-[Windows host running the AI agent]                    [Windows RDP target]
-  agent_rdp.py (launcher)                                  agent-rdp-bridge.exe
-    - spawns wfreerdp.exe                                   (runs directly from
-    - /dvc:agent-rdp  /drive:r2e,<local temp dir>              \\tsclient\r2e\...,
-    - /shell:"cmd.exe /d /c ..."                               never copied to
-    - /shell-dir:\\tsclient\r2e                                the target's disk)
-    - TCP loopback <-> DVC bytes
-        |
-        | DVC "agent-rdp" (framed protocol, src/common/protocol.hpp)
-        v
-  agent-rdp-client.dll (FreeRDP plugin)
-    - Dynamic Virtual Channel handler
-    - bridges DVC bytes <-> TCP loopback
+### How remote execution is carried over RDP
+
+The target-facing connection is an ordinary authenticated RDP session. `agent-rdp` does **not** open a second management connection and does not require WinRM, SSH, SMB, or a custom inbound port on the target. Instead, it combines three standard RDP capabilities inside that session:
+
+1. **Drive redirection** exposes an ephemeral client-side directory to the target as the `r2e` redirected drive (`\\tsclient\r2e`). The bridge executable and optional command script remain on the client and are read across this virtual filesystem channel.
+2. **Alternate Shell / Initial Program** asks the RDP session to run a short bootstrap command instead of Explorer. The bootstrap waits for drive redirection to become ready and starts the bridge directly from the redirected UNC path.
+3. **Dynamic Virtual Channel (DVC)** named `agent-rdp` carries framed stdin, stdout, stderr, resize, error, and exit-code messages between the target bridge and the client plugin.
+
+The TCP socket shown below is strictly client-local (`127.0.0.1` on the agent host). It connects the Python launcher to the FreeRDP plugin inside `wfreerdp.exe`; it is not reachable from the target or the network. The target-side bridge communicates only through the DVC already multiplexed into RDP.
+
+```mermaid
+flowchart LR
+    subgraph Client["Windows client / agent host"]
+        Agent["AI agent or operator"] --> Launcher["agent-rdp launcher"]
+        Launcher -->|"spawn and configure"| FreeRDP["wfreerdp.exe"]
+        SessionDir["Ephemeral client directory<br/>bridge + optional command script"] -->|"redirect as drive r2e"| FreeRDP
+        Plugin["agent-rdp-client.dll<br/>FreeRDP DVC plugin"] --- FreeRDP
+        Launcher <-->|"framed bytes on 127.0.0.1:random port"| Plugin
+    end
+
+    subgraph Transport["One authenticated RDP session"]
+        Drive["Drive redirection<br/>r2e"]
+        Initial["Alternate Shell<br/>Initial Program"]
+        DVC["Dynamic Virtual Channel<br/>agent-rdp"]
+    end
+
+    subgraph Target["Windows RDP target"]
+        Bridge["agent-rdp-bridge.exe<br/>runs from redirected drive"]
+        Child["cmd.exe or PowerShell child"]
+    end
+
+    FreeRDP -->|"RDP device channel"| Drive
+    FreeRDP -->|"RDP logon setting"| Initial
+    Plugin <-->|"RDP DVC traffic"| DVC
+    Drive -->|"read bridge and command file"| Bridge
+    Initial -->|"poll drive, then launch"| Bridge
+    DVC <-->|"protocol frames"| Bridge
+    Bridge -->|"CreateProcessW"| Child
 ```
 
+| Path | Scope | Purpose |
+|---|---|---|
+| RDP transport | Client ↔ target | Authentication, encryption, session setup, and multiplexing of the standard RDP virtual channels. |
+| Redirected `r2e` drive | Inside RDP | Makes the client-side bridge and command script readable as `\\tsclient\r2e\...`; this is RDP device redirection, not a network SMB share. |
+| Alternate Shell | Target RDP session | Starts the bridge headlessly after logon, without Run-dialog automation or a visible desktop. |
+| `agent-rdp` DVC | Inside RDP | Bidirectional framed command I/O and lifecycle messages. |
+| Ephemeral loopback TCP | Client only | Connects the launcher process to the plugin loaded inside `wfreerdp.exe`; never crosses the network. |
+
 1. **Launcher** (`src/launcher/agent_rdp.py`) spawns `wfreerdp.exe` with device redirection (`/drive:`) pointing at a local temp directory containing the bridge executable (and, for single-command mode, a small generated `.ps1`/`.cmd` script), a Dynamic Virtual Channel (`/dvc:agent-rdp`), and an **Alternate Shell** command line (`/shell:`) that waits for the redirected drive to mount and then runs the bridge straight off it.
-2. **FreeRDP client plugin** (`src/plugin/agent_rdp_client.cpp`, built as `agent-rdp-client.dll`) opens the `agent-rdp` DVC and relays bytes to/from a TCP loopback socket the launcher listens on.
+2. **FreeRDP client plugin** (`src/plugin/agent_rdp_client.cpp`, built as `agent-rdp-client.dll`) registers as the client handler for the `agent-rdp` DVC and relays bytes to/from a TCP loopback socket the launcher listens on. The target bridge initiates the channel open from inside the RDP session.
 3. **Windows bridge** (`src/windows/agent_rdp_bridge.cpp`) runs on the target, opens the DVC server-side (`WTSVirtualChannelOpenEx`), and either:
    - creates a ConPTY-backed interactive shell (no `--command-file`), or
    - runs a single command through plain stdin/stdout/stderr pipes (`--command-file` given), streaming stdout and stderr back as **separate** frames plus a final exit-code frame — the mode used for agent/single-command invocations.
@@ -177,6 +209,40 @@ Everything staged for a session lives in an ephemeral temp directory on the **cl
 ### End-to-end walkthrough
 
 What actually happens between typing `agent-rdp user@host cmd whoami` and getting output back:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as AI agent / operator
+    participant L as Python launcher
+    participant F as wfreerdp + client plugin
+    participant R as Target RDP session / stack
+    participant B as agent-rdp bridge
+    participant C as cmd.exe / PowerShell
+
+    A->>L: Request one command
+    L->>L: Resolve credentials, bind loopback listener,<br/>stage bridge and command script
+    L->>F: Spawn with drive, DVC, and Alternate Shell options<br/>send password over stdin
+    F->>F: Load plugin and register the agent-rdp DVC handler
+    F->>R: Authenticate, establish RDP session,<br/>and negotiate r2e drive redirection
+    R->>B: Alternate Shell starts bridge from redirected drive
+    B->>R: WTSVirtualChannelOpenEx for agent-rdp
+    R->>F: DVC opens in client plugin
+    F->>L: Connect to AGENT_RDP_SOCKET on 127.0.0.1
+    L->>F: Optional stdin frames
+    F->>R: Forward framed bytes through DVC
+    R->>B: Deliver protocol frames
+    B->>C: CreateProcessW using redirected command file
+    C-->>B: stdout and stderr on separate pipes
+    B-->>R: kOutput / kOutputErr frames
+    R-->>F: DVC traffic
+    F-->>L: Loopback traffic
+    C-->>B: Process exit code
+    B-->>L: kExit frame via DVC and plugin
+    L-->>A: stdout, stderr, exit code or JSON result
+```
+
+The diagram shows the single-command path used by agents. Interactive sessions use the same setup and transport, but the bridge creates a ConPTY instead of three plain pipes and the launcher continuously exchanges input and resize frames.
 
 1. **Resolve and validate (client).** The launcher parses the target(s), resolves the password (`-P` → `RDP_PASSWORD` → Credential Manager → interactive prompt), and confirms the two local binaries it needs exist: the FreeRDP plugin (`agent-rdp-client.dll`) and the bridge exe (`agent-rdp-bridge.exe`). Anything missing here fails fast as `local_setup_error` before a connection is attempted.
 2. **Open a loopback listener (client).** `LoopbackSocketServer` binds `127.0.0.1:0` — the OS picks a free port — and starts listening for exactly one connection. The chosen `host:port` is exported as the `AGENT_RDP_SOCKET` environment variable, which is how the plugin (below) will find its way back to this launcher instance. A random OS-assigned port per run is what makes concurrent multi-target sessions safe — no two collide.
