@@ -87,8 +87,8 @@ jobs:
           $rsa = $null
           $certificate = $null
           $trustedCertificate = $null
-          $trustedPeopleStore = $null
-          $trustedPeopleInstalled = $false
+          $trustedPublisherStore = $null
+          $trustedPublisherInstalled = $false
           $thumbprint = $null
           $passwordText = [Guid]::NewGuid().ToString("N")
           New-Item -ItemType Directory -Path $artifactCopy -Force | Out-Null
@@ -136,21 +136,21 @@ jobs:
             Write-Host "::notice title=agent-rdp signing smoke::Exported ephemeral PFX without a source store entry"
 
             # Trust this exact end-entity certificate without promoting it to a root CA or triggering root-store UI.
-            Write-Host "::notice title=agent-rdp signing smoke::Installing end-entity trust in TrustedPeople"
+            Write-Host "::notice title=agent-rdp signing smoke::Installing end-entity trust in TrustedPublisher"
             $trustedCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($cerPath)
-            $trustedPeopleStore = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-              [System.Security.Cryptography.X509Certificates.StoreName]::TrustedPeople,
+            $trustedPublisherStore = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+              [System.Security.Cryptography.X509Certificates.StoreName]::TrustedPublisher,
               [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
             )
             try {
-              $trustedPeopleStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-              $trustedPeopleStore.Add($trustedCertificate)
-              $trustedPeopleInstalled = $true
+              $trustedPublisherStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+              $trustedPublisherStore.Add($trustedCertificate)
+              $trustedPublisherInstalled = $true
             }
             finally {
-              $trustedPeopleStore.Close()
-              $trustedPeopleStore.Dispose()
-              $trustedPeopleStore = $null
+              $trustedPublisherStore.Close()
+              $trustedPublisherStore.Dispose()
+              $trustedPublisherStore = $null
               $trustedCertificate.Dispose()
               $trustedCertificate = $null
             }
@@ -174,9 +174,9 @@ jobs:
           finally {
             Remove-Item Env:\WINDOWS_SIGNING_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue
             $passwordText = $null
-            if ($trustedPeopleStore) {
-              $trustedPeopleStore.Close()
-              $trustedPeopleStore.Dispose()
+            if ($trustedPublisherStore) {
+              $trustedPublisherStore.Close()
+              $trustedPublisherStore.Dispose()
             }
             if ($trustedCertificate) { $trustedCertificate.Dispose() }
             if ($certificate) { $certificate.Dispose() }
@@ -185,24 +185,24 @@ jobs:
             if (Test-Path $myCertificatePath) {
               Remove-Item -Path $myCertificatePath -DeleteKey -Force
             }
-            if ($trustedPeopleInstalled) {
+            if ($trustedPublisherInstalled) {
               $cleanupStore = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-                [System.Security.Cryptography.X509Certificates.StoreName]::TrustedPeople,
+                [System.Security.Cryptography.X509Certificates.StoreName]::TrustedPublisher,
                 [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
               )
               try {
                 $cleanupStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-                $trustedPeopleCertificates = $cleanupStore.Certificates.Find(
+                $trustedPublisherCertificates = $cleanupStore.Certificates.Find(
                   [System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
                   $thumbprint,
                   $false
                 )
-                foreach ($trustedPeopleCertificate in $trustedPeopleCertificates) {
+                foreach ($trustedPublisherCertificate in $trustedPublisherCertificates) {
                   try {
-                    $cleanupStore.Remove($trustedPeopleCertificate)
+                    $cleanupStore.Remove($trustedPublisherCertificate)
                   }
                   finally {
-                    $trustedPeopleCertificate.Dispose()
+                    $trustedPublisherCertificate.Dispose()
                   }
                 }
               }

@@ -27,6 +27,11 @@ def test_signing_script_uses_sha256_rfc3161_and_environment_password():
     assert "$process.Kill($true)" in source
     assert "$process.WaitForExit(10000)" in source
     assert "$process.WaitForExit()" not in source
+    assert "$startInfo.RedirectStandardOutput = $true" in source
+    assert "$startInfo.RedirectStandardError = $true" in source
+    assert "ReadToEndAsync()" in source
+    assert "signtool stdout" in source
+    assert "signtool stderr" in source
     assert "TimeStamperCertificate" in source
     assert "SignerCertificate.Thumbprint" in source
     assert "SkipTimestamp signing already selected the certificate by thumbprint" in source
@@ -174,9 +179,10 @@ def test_ci_smoke_tests_authenticode_signing_helper():
     assert 'Oid]::new("1.3.6.1.5.5.7.3.3")' in workflow
     assert "Import-Certificate" not in workflow
     assert "certutil.exe" not in workflow
-    assert "StoreName]::TrustedPeople" in workflow
-    assert "$trustedPeopleStore.Add($trustedCertificate)" in workflow
-    assert "$cleanupStore.Remove($trustedPeopleCertificate)" in workflow
+    assert "StoreName]::TrustedPeople" not in workflow
+    assert "StoreName]::TrustedPublisher" in workflow
+    assert "$trustedPublisherStore.Add($trustedCertificate)" in workflow
+    assert "$cleanupStore.Remove($trustedPublisherCertificate)" in workflow
     assert "./scripts/sign-artifacts.ps1" in workflow
     assert "-SkipTimestamp" in workflow
     assert "-SignToolTimeoutSeconds 60" in workflow

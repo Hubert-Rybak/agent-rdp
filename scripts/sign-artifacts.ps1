@@ -120,6 +120,8 @@ function Invoke-SignTool {
     $startInfo.FileName = $SignToolPath
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
     foreach ($argument in $Arguments) {
         [void]$startInfo.ArgumentList.Add($argument)
     }
@@ -130,6 +132,9 @@ function Invoke-SignTool {
         if (-not $process.Start()) {
             throw "signtool could not start while attempting to $Operation"
         }
+        $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+        $timedOut = $false
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             try {
                 $process.Kill($true)
@@ -140,6 +145,18 @@ function Invoke-SignTool {
             if (-not $process.WaitForExit(10000)) {
                 throw "signtool timed out and did not terminate within 10 additional seconds while attempting to $Operation"
             }
+            $timedOut = $true
+        }
+
+        $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
+        $standardError = $standardErrorTask.GetAwaiter().GetResult()
+        if (-not [string]::IsNullOrWhiteSpace($standardOutput)) {
+            Write-Host "[agent-rdp] signtool stdout:`n$standardOutput"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($standardError)) {
+            Write-Host "[agent-rdp] signtool stderr:`n$standardError"
+        }
+        if ($timedOut) {
             throw "signtool timed out after $TimeoutSeconds second(s) while attempting to $Operation"
         }
         if ($process.ExitCode -ne 0) {
