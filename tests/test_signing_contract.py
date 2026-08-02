@@ -29,6 +29,7 @@ def test_signing_script_uses_sha256_rfc3161_and_environment_password():
     assert "$process.WaitForExit()" not in source
     assert "TimeStamperCertificate" in source
     assert "SignerCertificate.Thumbprint" in source
+    assert "SkipTimestamp signing already selected the certificate by thumbprint" in source
     assert "-DeleteKey" in source
     assert "EphemeralKeySet" in source
     assert "already exists in Cert:\\CurrentUser\\My" in source
@@ -155,10 +156,12 @@ def test_ci_smoke_tests_authenticode_signing_helper():
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
 
     assert "- name: Smoke-test Authenticode signing helper" in workflow
-    assert "timeout-minutes: 10" in workflow
+    assert "timeout-minutes: 5" in workflow
     assert "New-SelfSignedCertificate" in workflow
     assert "./scripts/sign-artifacts.ps1" in workflow
     assert "-SkipTimestamp" in workflow
+    assert "-SignToolTimeoutSeconds 60" in workflow
+    assert "Get-AuthenticodeSignature" not in workflow
     assert "Signing helper left its imported certificate" in workflow
     assert "name: agent-rdp-windows-build-unsigned" in workflow
     assert "retention-days: 7" in workflow

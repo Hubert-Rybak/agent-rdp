@@ -235,6 +235,12 @@ try {
             -TimeoutSeconds $SignToolTimeoutSeconds `
             -Operation "verify $($file.FullName)"
 
+        if ($SkipTimestamp) {
+            # SkipTimestamp signing already selected the certificate by thumbprint and SignTool verification succeeded.
+            # Avoid WinVerifyTrust revocation lookups for an ephemeral self-signed CI certificate.
+            continue
+        }
+
         $signature = Get-AuthenticodeSignature -FilePath $file.FullName
         if ($signature.Status -ne "Valid") {
             throw "Authenticode status for $($file.FullName) is $($signature.Status), not Valid"
