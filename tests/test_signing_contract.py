@@ -155,7 +155,7 @@ def test_ci_smoke_tests_authenticode_signing_helper():
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
 
     assert "- name: Smoke-test Authenticode signing helper" in workflow
-    assert "timeout-minutes: 5" in workflow
+    assert "timeout-minutes: 10" in workflow
     assert "New-SelfSignedCertificate" in workflow
     assert "./scripts/sign-artifacts.ps1" in workflow
     assert "-SkipTimestamp" in workflow

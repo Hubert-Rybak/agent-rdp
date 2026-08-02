@@ -77,7 +77,8 @@ jobs:
         run: ./scripts/build.ps1
 
       - name: Smoke-test Authenticode signing helper
-        timeout-minutes: 5
+        # Four individually bounded SignTool sign/verify calls may cumulatively exceed five minutes on a cold runner.
+        timeout-minutes: 10
         shell: pwsh
         run: |
           $temporaryDirectory = Join-Path $env:RUNNER_TEMP "agent-rdp-signing-smoke"
