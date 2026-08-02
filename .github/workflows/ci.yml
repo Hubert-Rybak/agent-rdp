@@ -84,10 +84,13 @@ jobs:
           $pfxPath = Join-Path $temporaryDirectory "smoke.pfx"
           $cerPath = Join-Path $temporaryDirectory "smoke.cer"
           $artifactCopy = Join-Path $temporaryDirectory "artifacts"
+          $certificate = $null
+          $thumbprint = $null
           $passwordText = [Guid]::NewGuid().ToString("N")
           $securePassword = ConvertTo-SecureString $passwordText -AsPlainText -Force
           New-Item -ItemType Directory -Path $artifactCopy -Force | Out-Null
 
+          Write-Host "::notice title=agent-rdp signing smoke::Preparing ephemeral signing certificate"
           $certificate = New-SelfSignedCertificate `
             -Type CodeSigningCert `
             -Subject "CN=agent-rdp CI signing smoke" `
@@ -95,20 +98,25 @@ jobs:
             -KeyExportPolicy Exportable `
             -NotAfter (Get-Date).AddDays(1)
           $thumbprint = $certificate.Thumbprint
+          $certificateStorePath = "Cert:\CurrentUser\My\$thumbprint"
 
           try {
             Export-PfxCertificate -Cert $certificate -FilePath $pfxPath -Password $securePassword | Out-Null
             Export-Certificate -Cert $certificate -FilePath $cerPath | Out-Null
             Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
-            Remove-Item -Path "Cert:\CurrentUser\My\$thumbprint" -DeleteKey -Force
+            $certificate.Dispose()
+            $certificate = $null
+            Remove-Item -LiteralPath $certificateStorePath -DeleteKey -Force
 
             Copy-Item artifacts/agent-rdp-bridge.exe, artifacts/agent-rdp-client.dll -Destination $artifactCopy
             $env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD = $passwordText
+            Write-Host "::notice title=agent-rdp signing smoke::Invoking bounded signing helper"
             ./scripts/sign-artifacts.ps1 `
               -CertificatePath $pfxPath `
               -ArtifactsDirectory $artifactCopy `
               -SkipTimestamp `
               -SignToolTimeoutSeconds 60
+            Write-Host "::notice title=agent-rdp signing smoke::Signing helper completed"
 
             $importedCertificatePath = "Cert:\CurrentUser\My\$thumbprint"
             if (Test-Path $importedCertificatePath) {
@@ -119,6 +127,10 @@ jobs:
             Remove-Item Env:\WINDOWS_SIGNING_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue
             $passwordText = $null
             if ($securePassword) { $securePassword.Dispose() }
+            if ($certificate) {
+              $certificate.Dispose()
+              $certificate = $null
+            }
             foreach ($store in @("My", "Root")) {
               $certificatePath = "Cert:\CurrentUser\$store\$thumbprint"
               if (Test-Path $certificatePath) {

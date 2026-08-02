@@ -271,6 +271,17 @@ finally {
             }
         }
 
+        foreach ($importedCertificate in $importedCertificates) {
+            $importedThumbprint = "<unknown>"
+            try {
+                $importedThumbprint = $importedCertificate.Thumbprint
+                $importedCertificate.Dispose()
+            }
+            catch {
+                [void]$cleanupErrors.Add("Could not dispose imported certificate $importedThumbprint`: $($_.Exception.Message)")
+            }
+        }
+
         foreach ($thumbprint in $expectedCertificateThumbprints) {
             if ($importAttempted -and $existingCertificateThumbprints -notcontains $thumbprint) {
                 try {
@@ -282,15 +293,6 @@ finally {
                 catch {
                     [void]$cleanupErrors.Add("Could not remove imported certificate $thumbprint and its private key: $($_.Exception.Message)")
                 }
-            }
-        }
-
-        foreach ($importedCertificate in $importedCertificates) {
-            try {
-                $importedCertificate.Dispose()
-            }
-            catch {
-                [void]$cleanupErrors.Add("Could not dispose imported certificate $($importedCertificate.Thumbprint): $($_.Exception.Message)")
             }
         }
     }

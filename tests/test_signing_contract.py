@@ -38,6 +38,9 @@ def test_signing_script_uses_sha256_rfc3161_and_environment_password():
     assert "$expectedCertificateThumbprints" in source
     assert "$cleanupErrors" in source
     assert "$importedCertificate.Dispose()" in source
+    assert source.index("foreach ($importedCertificate in $importedCertificates)") < source.index(
+        "foreach ($thumbprint in $expectedCertificateThumbprints)"
+    )
 
 
 def test_sign_tool_discovery_does_not_recursively_scan_the_windows_sdk():
@@ -162,6 +165,10 @@ def test_ci_smoke_tests_authenticode_signing_helper():
     assert "-SkipTimestamp" in workflow
     assert "-SignToolTimeoutSeconds 60" in workflow
     assert "Get-AuthenticodeSignature" not in workflow
+    assert "$certificate.Dispose()" in workflow
+    assert workflow.index("$certificate.Dispose()") < workflow.index(
+        "Remove-Item -LiteralPath $certificateStorePath -DeleteKey"
+    )
     assert "Signing helper left its imported certificate" in workflow
     assert "name: agent-rdp-windows-build-unsigned" in workflow
     assert "retention-days: 7" in workflow
