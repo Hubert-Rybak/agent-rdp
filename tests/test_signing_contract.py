@@ -169,8 +169,10 @@ def test_ci_smoke_tests_authenticode_signing_helper():
     assert "X509EnhancedKeyUsageExtension" in workflow
     assert 'Oid]::new("1.3.6.1.5.5.7.3.3")' in workflow
     assert "Import-Certificate" not in workflow
-    assert "certutil.exe -user -f -addstore Root" in workflow
-    assert "certutil.exe -user -delstore Root" in workflow
+    assert "certutil.exe" not in workflow
+    assert "StoreName]::TrustedPeople" in workflow
+    assert "$trustedPeopleStore.Add($trustedCertificate)" in workflow
+    assert "$cleanupStore.Remove($trustedPeopleCertificate)" in workflow
     assert "./scripts/sign-artifacts.ps1" in workflow
     assert "-SkipTimestamp" in workflow
     assert "-SignToolTimeoutSeconds 60" in workflow
