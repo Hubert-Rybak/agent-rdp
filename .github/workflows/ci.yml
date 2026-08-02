@@ -43,13 +43,76 @@ jobs:
           restore-keys: |
             vcpkg-${{ runner.os }}-
 
+      - name: Validate PowerShell script syntax
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Path scripts -Filter "*.ps1" -File | ForEach-Object {
+            $scriptName = $_.Name
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            foreach ($parseError in $errors) {
+              Write-Error "${scriptName}: $($parseError.Message)"
+              $failed = $true
+            }
+          }
+          if ($failed) { throw "PowerShell syntax validation failed" }
+
       - name: Build agent-rdp-client.dll + agent-rdp-bridge.exe
         shell: pwsh
         run: ./scripts/build.ps1
+
+      - name: Smoke-test Authenticode signing helper
+        shell: pwsh
+        run: |
+          $temporaryDirectory = Join-Path $env:RUNNER_TEMP "agent-rdp-signing-smoke"
+          $pfxPath = Join-Path $temporaryDirectory "smoke.pfx"
+          $cerPath = Join-Path $temporaryDirectory "smoke.cer"
+          $artifactCopy = Join-Path $temporaryDirectory "artifacts"
+          $passwordText = [Guid]::NewGuid().ToString("N")
+          $securePassword = ConvertTo-SecureString $passwordText -AsPlainText -Force
+          New-Item -ItemType Directory -Path $artifactCopy -Force | Out-Null
+
+          $certificate = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject "CN=agent-rdp CI signing smoke" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -KeyExportPolicy Exportable `
+            -NotAfter (Get-Date).AddDays(1)
+          $thumbprint = $certificate.Thumbprint
+
+          try {
+            Export-PfxCertificate -Cert $certificate -FilePath $pfxPath -Password $securePassword | Out-Null
+            Export-Certificate -Cert $certificate -FilePath $cerPath | Out-Null
+            Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+            Remove-Item -Path "Cert:\CurrentUser\My\$thumbprint" -Force
+
+            Copy-Item artifacts/agent-rdp-bridge.exe, artifacts/agent-rdp-client.dll -Destination $artifactCopy
+            $env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD = $passwordText
+            ./scripts/sign-artifacts.ps1 -CertificatePath $pfxPath -ArtifactsDirectory $artifactCopy
+
+            Get-ChildItem -Path $artifactCopy -File | ForEach-Object {
+              $signature = Get-AuthenticodeSignature -FilePath $_.FullName
+              if ($signature.Status -ne "Valid") {
+                throw "Signing smoke test produced an invalid signature for $($_.Name): $($signature.Status)"
+              }
+            }
+          }
+          finally {
+            Remove-Item Env:\WINDOWS_SIGNING_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue
+            $passwordText = $null
+            if ($securePassword) { $securePassword.Dispose() }
+            foreach ($store in @("My", "Root")) {
+              $certificatePath = "Cert:\CurrentUser\$store\$thumbprint"
+              if (Test-Path $certificatePath) { Remove-Item -Path $certificatePath -Force }
+            }
+            if (Test-Path $temporaryDirectory) { Remove-Item -Path $temporaryDirectory -Recurse -Force }
+          }
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: agent-rdp-windows-build
           path: artifacts/
-          if-no-files-found: warn
+          if-no-files-found: error

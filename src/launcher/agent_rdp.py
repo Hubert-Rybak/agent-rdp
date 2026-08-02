@@ -78,6 +78,14 @@ _bundled_wfreerdp = DEFAULT_ARTIFACTS_DIR / "wfreerdp.exe"
 DEFAULT_WFREERDP = str(_bundled_wfreerdp) if _bundled_wfreerdp.exists() else "wfreerdp.exe"
 DEFAULT_DRIVE_NAME = "r2e"
 DEFAULT_HELPER_EXE = str(DEFAULT_ARTIFACTS_DIR / "agent-rdp-bridge.exe")
+POWERSHELL_EXECUTION_POLICIES = (
+    "default",
+    "allsigned",
+    "remotesigned",
+    "restricted",
+    "unrestricted",
+    "bypass",
+)
 
 FRAME_INPUT = 0x01
 FRAME_RESIZE = 0x02
@@ -356,7 +364,7 @@ def build_command_script(child: str, command: list[str]) -> tuple[str, str]:
 
 
 def build_alternate_shell(drive_name: str, child: str, cols: int, rows: int, command_file: str,
-                          poll_attempts: int) -> str:
+                          poll_attempts: int, powershell_execution_policy: str = "default") -> str:
     """Build the RDP AlternateShell (Initial Program) command line.
 
     Polls for the FreeRDP-redirected client drive to be mounted (device
@@ -369,11 +377,20 @@ def build_alternate_shell(drive_name: str, child: str, cols: int, rows: int, com
     child = child.lower().strip()
     if child not in {"powershell", "cmd"}:
         raise ValueError("child must be powershell or cmd")
+    powershell_execution_policy = powershell_execution_policy.lower().strip()
+    if powershell_execution_policy not in POWERSHELL_EXECUTION_POLICIES:
+        raise ValueError("invalid PowerShell execution policy")
+    if child != "powershell" and powershell_execution_policy != "default":
+        raise ValueError("PowerShell execution policy only applies to the powershell child")
+    if not command_file and powershell_execution_policy != "default":
+        raise ValueError("PowerShell execution policy override requires a one-shot PowerShell command")
 
     exe_unc = rf"\\tsclient\{drive_name}\agent-rdp-bridge.exe"
     bridge_args = f"--channel agent-rdp --child {child} --cols {cols} --rows {rows}"
     if command_file:
         bridge_args += f" --command-file {command_file}"
+        if powershell_execution_policy != "default":
+            bridge_args += f" --powershell-execution-policy {powershell_execution_policy}"
 
     poll_attempts = max(1, poll_attempts)
     inner = (
@@ -385,7 +402,8 @@ def build_alternate_shell(drive_name: str, child: str, cols: int, rows: int, com
 
 
 def prepare_drive_share(base_dir: Path, helper_exe: Path, child: str, drive_name: str, cols: int, rows: int,
-                        poll_timeout: float, command: list[str] | None = None) -> tuple[Path, str]:
+                        poll_timeout: float, command: list[str] | None = None,
+                        powershell_execution_policy: str = "default") -> tuple[Path, str]:
     """Stage the bridge exe and any per-command script into a client-side
     temp directory that gets redirected to the target over RDP. Nothing here
     touches the target's disk -- both source and destination are local to
@@ -404,7 +422,15 @@ def prepare_drive_share(base_dir: Path, helper_exe: Path, child: str, drive_name
         command_file = rf"\\tsclient\{drive_name}\{command_name}"
 
     poll_attempts = max(1, int(poll_timeout))
-    alternate_shell = build_alternate_shell(drive_name, child, cols, rows, command_file, poll_attempts)
+    alternate_shell = build_alternate_shell(
+        drive_name,
+        child,
+        cols,
+        rows,
+        command_file,
+        poll_attempts,
+        powershell_execution_policy=powershell_execution_policy,
+    )
     return base_dir, alternate_shell
 
 
@@ -469,6 +495,7 @@ def build_wfreerdp_command(args, share_dir: Path, username: str, host: str):
     _, alternate_shell = prepare_drive_share(
         share_dir, args.helper_exe_path, args.child, args.drive_name, cols, rows,
         poll_timeout=args.drive_poll_timeout, command=args.command or None,
+        powershell_execution_policy=args.powershell_execution_policy,
     )
     cmd = [
         args.wfreerdp,
@@ -927,10 +954,25 @@ def parser():
                         "multiple targets in parallel.")
     p.add_argument("child", nargs="?", choices=["powershell", "cmd"], default="powershell")
     p.add_argument("command", nargs=argparse.REMAINDER)
+    p.add_argument(
+        "--powershell-execution-policy",
+        choices=POWERSHELL_EXECUTION_POLICIES,
+        default="default",
+        help="PowerShell execution policy for one-shot commands. The default respects the target's "
+             "configured policy; 'bypass' is an explicit compatibility override and can increase "
+             "antivirus/EDR scrutiny. Place this option before the target.",
+    )
     p.add_argument("-p", "--port", type=int, default=int(os.environ.get("RDP_PORT", "3389")))
     p.add_argument("-P", "--password", default=os.environ.get("RDP_PASSWORD", ""))
     p.add_argument("-d", "--domain", default=os.environ.get("RDP_DOMAIN", ""))
-    p.add_argument("--cert-ignore", action="store_true", default=True)
+    p.add_argument(
+        "--insecure-cert-ignore",
+        "--cert-ignore",
+        dest="cert_ignore",
+        action="store_true",
+        default=False,
+        help="INSECURE compatibility override: disable RDP server certificate validation and emit a warning.",
+    )
     p.add_argument("--wfreerdp", default=os.environ.get("WFREERDP", DEFAULT_WFREERDP))
     p.add_argument("--plugin-dir", default=os.environ.get("AGENT_RDP_PLUGIN_DIR", DEFAULT_PLUGIN_DIR))
     p.add_argument("--plugin-name", default=os.environ.get("AGENT_RDP_PLUGIN_NAME", DEFAULT_PLUGIN_NAME))
@@ -980,23 +1022,37 @@ def resolve_targets(args, p) -> list[tuple[str, str]]:
     p.error("a target is required: user@hostname (or a comma-separated list / --targets-file)")
 
 
+def validate_args(args, p, *, multi: bool):
+    """Reject incompatible option combinations before local checks, prompts, or connection attempts."""
+    if not args.command:
+        if args.powershell_execution_policy != "default":
+            p.error("--powershell-execution-policy requires a one-shot PowerShell command")
+        if multi:
+            p.error("multi-target mode requires a command (the interactive shell is single-target only)")
+        if args.json:
+            p.error("--json requires a command (interactive mode streams a live terminal)")
+    if args.child != "powershell" and args.powershell_execution_policy != "default":
+        p.error("--powershell-execution-policy only applies to the powershell child")
+    if multi and args.share_dir:
+        p.error("--share-dir cannot be combined with multiple targets (each target needs its own share dir)")
+    if args.save_credential and not args.credential_target:
+        p.error("--save-credential requires --credential-target NAME")
+
+
 def main():
     set_binary_mode()
     p = parser()
     args = p.parse_args()
 
+    if args.cert_ignore:
+        print(
+            "agent-rdp: WARNING: --insecure-cert-ignore disables RDP server certificate validation.",
+            file=sys.stderr,
+        )
+
     targets = resolve_targets(args, p)
     multi = len(targets) > 1
-
-    if not args.command:
-        if multi:
-            p.error("multi-target mode requires a command (the interactive shell is single-target only)")
-        if args.json:
-            p.error("--json requires a command (interactive mode streams a live terminal)")
-    if multi and args.share_dir:
-        p.error("--share-dir cannot be combined with multiple targets (each target needs its own share dir)")
-    if args.save_credential and not args.credential_target:
-        p.error("--save-credential requires --credential-target NAME")
+    validate_args(args, p, multi=multi)
 
     # Validate local components once, before any (possibly concurrent) connect.
     ensure_plugin(args.plugin_dir, args.plugin_name)

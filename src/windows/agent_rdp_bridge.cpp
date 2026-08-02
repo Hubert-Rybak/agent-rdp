@@ -146,9 +146,31 @@ struct Args
   std::string channel = "agent-rdp";
   std::wstring child = L"powershell";
   std::wstring command_file;
+  std::wstring powershell_execution_policy;
   short cols = 120;
   short rows = 40;
+  bool valid = true;
 };
+
+static bool set_powershell_execution_policy(Args &args, const std::wstring &value)
+{
+  if (_wcsicmp(value.c_str(), L"default") == 0)
+  {
+    args.powershell_execution_policy.clear();
+    return true;
+  }
+
+  const wchar_t *allowed[] = {L"AllSigned", L"RemoteSigned", L"Restricted", L"Unrestricted", L"Bypass"};
+  for (const wchar_t *policy : allowed)
+  {
+    if (_wcsicmp(value.c_str(), policy) == 0)
+    {
+      args.powershell_execution_policy = policy;
+      return true;
+    }
+  }
+  return false;
+}
 
 static Args parse_args(int argc, wchar_t **argv)
 {
@@ -169,6 +191,17 @@ static Args parse_args(int argc, wchar_t **argv)
     {
       args.command_file = argv[++i];
     }
+    else if (a == L"--powershell-execution-policy")
+    {
+      if (i + 1 >= argc)
+      {
+        args.valid = false;
+      }
+      else
+      {
+        args.valid = set_powershell_execution_policy(args, argv[++i]) && args.valid;
+      }
+    }
     else if (a == L"--cols" && i + 1 < argc)
     {
       args.cols = static_cast<short>(_wtoi(argv[++i]));
@@ -182,6 +215,11 @@ static Args parse_args(int argc, wchar_t **argv)
     args.cols = 120;
   if (args.rows <= 0)
     args.rows = 40;
+  if (!args.powershell_execution_policy.empty() &&
+      (_wcsicmp(args.child.c_str(), L"powershell") != 0 || args.command_file.empty()))
+  {
+    args.valid = false;
+  }
   return args;
 }
 
@@ -213,9 +251,15 @@ static std::wstring build_command_line(const Args &args)
 
   if (!args.command_file.empty())
   {
-    return L"\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" "
-           L"-NoLogo -NoProfile -ExecutionPolicy Bypass -File " +
-           quote_win32_arg(args.command_file);
+    std::wstring command =
+        L"\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" "
+        L"-NoLogo -NoProfile -NonInteractive";
+    if (!args.powershell_execution_policy.empty())
+    {
+      command += L" -ExecutionPolicy " + args.powershell_execution_policy;
+    }
+    command += L" -File " + quote_win32_arg(args.command_file);
+    return command;
   }
 
   return L"\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" "
@@ -620,6 +664,10 @@ static int run_pipe_mode(HANDLE channel, WriteGuard &write_guard, const Args &ar
 int wmain(int argc, wchar_t **argv)
 {
   Args args = parse_args(argc, argv);
+  if (!args.valid)
+  {
+    return ERROR_INVALID_PARAMETER;
+  }
 
   HANDLE channel = WTSVirtualChannelOpenEx(WTS_CURRENT_SESSION, const_cast<LPSTR>(args.channel.c_str()),
                                            WTS_CHANNEL_OPTION_DYNAMIC);
