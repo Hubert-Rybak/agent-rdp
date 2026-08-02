@@ -154,7 +154,7 @@ The target-facing connection is an ordinary authenticated RDP session. `agent-rd
 The TCP socket shown below is strictly client-local (`127.0.0.1` on the agent host). It connects the Python launcher to the FreeRDP plugin inside `wfreerdp.exe`; it is not reachable from the target or the network. The target-side bridge communicates only through the DVC already multiplexed into RDP.
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph Client["Windows client / agent host"]
         Agent["AI agent or operator"] --> Launcher["agent-rdp launcher"]
         Launcher -->|"spawn and configure"| FreeRDP["wfreerdp.exe"]
@@ -213,33 +213,33 @@ What actually happens between typing `agent-rdp user@host cmd whoami` and gettin
 ```mermaid
 sequenceDiagram
     autonumber
-    participant A as AI agent / operator
-    participant L as Python launcher
-    participant F as wfreerdp + client plugin
-    participant R as Target RDP session / stack
-    participant B as agent-rdp bridge
-    participant C as cmd.exe / PowerShell
+    participant A as Agent
+    participant L as Launcher
+    participant F as FreeRDP + plugin
+    participant R as RDP session
+    participant B as Bridge
+    participant C as Child process
 
-    A->>L: Request one command
-    L->>L: Resolve credentials, bind loopback listener,<br/>stage bridge and command script
-    L->>F: Spawn with drive, DVC, and Alternate Shell options<br/>send password over stdin
-    F->>F: Load plugin and register the agent-rdp DVC handler
-    F->>R: Authenticate, establish RDP session,<br/>and negotiate r2e drive redirection
-    R->>B: Alternate Shell starts bridge from redirected drive
-    B->>R: WTSVirtualChannelOpenEx for agent-rdp
-    R->>F: DVC opens in client plugin
-    F->>L: Connect to AGENT_RDP_SOCKET on 127.0.0.1
+    A->>L: Run one command
+    L->>L: Resolve credentials, bind loopback,<br/>stage bridge and command script
+    L->>F: Spawn with drive, DVC, and Alternate Shell<br/>password via stdin
+    F->>F: Load agent-rdp DVC plugin
+    F->>R: Authenticate and redirect drive r2e
+    R->>B: Alternate Shell starts redirected bridge
+    B->>R: Open agent-rdp DVC
+    R->>F: Invoke DVC plugin callback
+    F->>L: Connect to 127.0.0.1 listener
     L->>F: Optional stdin frames
-    F->>R: Forward framed bytes through DVC
-    R->>B: Deliver protocol frames
-    B->>C: CreateProcessW using redirected command file
-    C-->>B: stdout and stderr on separate pipes
+    F->>R: Forward frames through DVC
+    R->>B: Deliver frames
+    B->>C: CreateProcessW with command file
+    C-->>B: Separate stdout and stderr
     B-->>R: kOutput / kOutputErr frames
     R-->>F: DVC traffic
     F-->>L: Loopback traffic
-    C-->>B: Process exit code
-    B-->>L: kExit frame via DVC and plugin
-    L-->>A: stdout, stderr, exit code or JSON result
+    C-->>B: Exit code
+    B-->>L: kExit via DVC and plugin
+    L-->>A: stdout, stderr, exit code or JSON
 ```
 
 The diagram shows the single-command path used by agents. Interactive sessions use the same setup and transport, but the bridge creates a ConPTY instead of three plain pipes and the launcher continuously exchanges input and resize frames.
