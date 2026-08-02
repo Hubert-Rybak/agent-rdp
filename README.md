@@ -57,8 +57,14 @@ agent-rdp user@hostname powershell Get-Process
 
 agent-rdp user@hostname cmd ipconfig /all
 
+# Compatibility override only: explicitly bypass the target's PowerShell execution policy
+agent-rdp --powershell-execution-policy bypass user@hostname powershell Get-Process
+
 # Non-default port
 agent-rdp -p 3390 user@hostname
+
+# Insecure compatibility override for a known, authorized host with an untrusted certificate
+agent-rdp --insecure-cert-ignore user@hostname cmd whoami
 
 # Password via argument (or set RDP_PASSWORD)
 agent-rdp -P 'secret' user@hostname powershell
@@ -74,6 +80,10 @@ agent-rdp --credential-target my-rdp-box user@hostname cmd whoami
 ```
 
 `command...` triggers single-command mode (non-interactive, plain-pipe I/O). Omit it to get an interactive ConPTY-backed shell.
+
+One-shot PowerShell commands respect the target's configured execution policy by default. If an authorized environment requires an explicit policy, place `--powershell-execution-policy {allsigned,remotesigned,restricted,unrestricted,bypass}` before the target. `bypass` is never implicit: it can increase antivirus/EDR scrutiny and should only be used when the target's administrator has approved that compatibility override.
+
+RDP server certificate validation is also enabled by default. `--insecure-cert-ignore` (legacy alias: `--cert-ignore`) is an explicit compatibility override for known authorized targets with certificates that cannot yet be trusted; it emits a warning and must not be used as the production default.
 
 ### Using this as an AI agent tool
 
@@ -133,24 +143,56 @@ Resolution order: `-P/--password` → `RDP_PASSWORD` → `--credential-target` (
 
 ## Architecture
 
-```
-[Windows host running the AI agent]                    [Windows RDP target]
-  agent_rdp.py (launcher)                                  agent-rdp-bridge.exe
-    - spawns wfreerdp.exe                                   (runs directly from
-    - /dvc:agent-rdp  /drive:r2e,<local temp dir>              \\tsclient\r2e\...,
-    - /shell:"cmd.exe /d /c ..."                               never copied to
-    - /shell-dir:\\tsclient\r2e                                the target's disk)
-    - TCP loopback <-> DVC bytes
-        |
-        | DVC "agent-rdp" (framed protocol, src/common/protocol.hpp)
-        v
-  agent-rdp-client.dll (FreeRDP plugin)
-    - Dynamic Virtual Channel handler
-    - bridges DVC bytes <-> TCP loopback
+### How remote execution is carried over RDP
+
+The target-facing connection is an ordinary authenticated RDP session. `agent-rdp` does **not** open a second management connection and does not require WinRM, SSH, SMB, or a custom inbound port on the target. Instead, it combines three standard RDP capabilities inside that session:
+
+1. **Drive redirection** exposes an ephemeral client-side directory to the target as the `r2e` redirected drive (`\\tsclient\r2e`). The bridge executable and optional command script remain on the client and are read across this virtual filesystem channel.
+2. **Alternate Shell / Initial Program** asks the RDP session to run a short bootstrap command instead of Explorer. The bootstrap waits for drive redirection to become ready and starts the bridge directly from the redirected UNC path.
+3. **Dynamic Virtual Channel (DVC)** named `agent-rdp` carries framed stdin, stdout, stderr, resize, error, and exit-code messages between the target bridge and the client plugin.
+
+The TCP socket shown below is strictly client-local (`127.0.0.1` on the agent host). It connects the Python launcher to the FreeRDP plugin inside `wfreerdp.exe`; it is not reachable from the target or the network. The target-side bridge communicates only through the DVC already multiplexed into RDP.
+
+```mermaid
+flowchart TB
+    subgraph Client["Windows client / agent host"]
+        Agent["AI agent or operator"] --> Launcher["agent-rdp launcher"]
+        Launcher -->|"spawn and configure"| FreeRDP["wfreerdp.exe"]
+        SessionDir["Ephemeral client directory<br/>bridge + optional command script"] -->|"redirect as drive r2e"| FreeRDP
+        Plugin["agent-rdp-client.dll<br/>FreeRDP DVC plugin"] --- FreeRDP
+        Launcher <-->|"framed bytes on 127.0.0.1:random port"| Plugin
+    end
+
+    subgraph Transport["One authenticated RDP session"]
+        Drive["Drive redirection<br/>r2e"]
+        Initial["Alternate Shell<br/>Initial Program"]
+        DVC["Dynamic Virtual Channel<br/>agent-rdp"]
+    end
+
+    subgraph Target["Windows RDP target"]
+        Bridge["agent-rdp-bridge.exe<br/>runs from redirected drive"]
+        Child["cmd.exe or PowerShell child"]
+    end
+
+    FreeRDP -->|"RDP device channel"| Drive
+    FreeRDP -->|"RDP logon setting"| Initial
+    Plugin <-->|"RDP DVC traffic"| DVC
+    Drive -->|"read bridge and command file"| Bridge
+    Initial -->|"poll drive, then launch"| Bridge
+    DVC <-->|"protocol frames"| Bridge
+    Bridge -->|"CreateProcessW"| Child
 ```
 
+| Path | Scope | Purpose |
+|---|---|---|
+| RDP transport | Client ↔ target | Authentication, encryption, session setup, and multiplexing of the standard RDP virtual channels. |
+| Redirected `r2e` drive | Inside RDP | Makes the client-side bridge and command script readable as `\\tsclient\r2e\...`; this is RDP device redirection, not a network SMB share. |
+| Alternate Shell | Target RDP session | Starts the bridge headlessly after logon, without Run-dialog automation or a visible desktop. |
+| `agent-rdp` DVC | Inside RDP | Bidirectional framed command I/O and lifecycle messages. |
+| Ephemeral loopback TCP | Client only | Connects the launcher process to the plugin loaded inside `wfreerdp.exe`; never crosses the network. |
+
 1. **Launcher** (`src/launcher/agent_rdp.py`) spawns `wfreerdp.exe` with device redirection (`/drive:`) pointing at a local temp directory containing the bridge executable (and, for single-command mode, a small generated `.ps1`/`.cmd` script), a Dynamic Virtual Channel (`/dvc:agent-rdp`), and an **Alternate Shell** command line (`/shell:`) that waits for the redirected drive to mount and then runs the bridge straight off it.
-2. **FreeRDP client plugin** (`src/plugin/agent_rdp_client.cpp`, built as `agent-rdp-client.dll`) opens the `agent-rdp` DVC and relays bytes to/from a TCP loopback socket the launcher listens on.
+2. **FreeRDP client plugin** (`src/plugin/agent_rdp_client.cpp`, built as `agent-rdp-client.dll`) registers as the client handler for the `agent-rdp` DVC and relays bytes to/from a TCP loopback socket the launcher listens on. The target bridge initiates the channel open from inside the RDP session.
 3. **Windows bridge** (`src/windows/agent_rdp_bridge.cpp`) runs on the target, opens the DVC server-side (`WTSVirtualChannelOpenEx`), and either:
    - creates a ConPTY-backed interactive shell (no `--command-file`), or
    - runs a single command through plain stdin/stdout/stderr pipes (`--command-file` given), streaming stdout and stderr back as **separate** frames plus a final exit-code frame — the mode used for agent/single-command invocations.
@@ -167,6 +209,40 @@ Everything staged for a session lives in an ephemeral temp directory on the **cl
 ### End-to-end walkthrough
 
 What actually happens between typing `agent-rdp user@host cmd whoami` and getting output back:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Agent
+    participant L as Launcher
+    participant F as FreeRDP + plugin
+    participant R as RDP session
+    participant B as Bridge
+    participant C as Child process
+
+    A->>L: Run one command
+    L->>L: Resolve credentials, bind loopback,<br/>stage bridge and command script
+    L->>F: Spawn with drive, DVC, and Alternate Shell<br/>password via stdin
+    F->>F: Load agent-rdp DVC plugin
+    F->>R: Authenticate and redirect drive r2e
+    R->>B: Alternate Shell starts redirected bridge
+    B->>R: Open agent-rdp DVC
+    R->>F: Invoke DVC plugin callback
+    F->>L: Connect to 127.0.0.1 listener
+    L->>F: Optional stdin frames
+    F->>R: Forward frames through DVC
+    R->>B: Deliver frames
+    B->>C: CreateProcessW with command file
+    C-->>B: Separate stdout and stderr
+    B-->>R: kOutput / kOutputErr frames
+    R-->>F: DVC traffic
+    F-->>L: Loopback traffic
+    C-->>B: Exit code
+    B-->>L: kExit via DVC and plugin
+    L-->>A: stdout, stderr, exit code or JSON
+```
+
+The diagram shows the single-command path used by agents. Interactive sessions use the same setup and transport, but the bridge creates a ConPTY instead of three plain pipes and the launcher continuously exchanges input and resize frames.
 
 1. **Resolve and validate (client).** The launcher parses the target(s), resolves the password (`-P` → `RDP_PASSWORD` → Credential Manager → interactive prompt), and confirms the two local binaries it needs exist: the FreeRDP plugin (`agent-rdp-client.dll`) and the bridge exe (`agent-rdp-bridge.exe`). Anything missing here fails fast as `local_setup_error` before a connection is attempted.
 2. **Open a loopback listener (client).** `LoopbackSocketServer` binds `127.0.0.1:0` — the OS picks a free port — and starts listening for exactly one connection. The chosen `host:port` is exported as the `AGENT_RDP_SOCKET` environment variable, which is how the plugin (below) will find its way back to this launcher instance. A random OS-assigned port per run is what makes concurrent multi-target sessions safe — no two collide.
@@ -244,11 +320,32 @@ Prerequisites:
 
 This bootstraps vcpkg, installs FreeRDP (`client` feature) via `vcpkg.json` using the repository's `x64-windows-agent-rdp` triplet (which enables the native Windows client disabled by vcpkg's standard port), builds `agent-rdp-client.dll` and `agent-rdp-bridge.exe` via `CMakeLists.txt`, and stages everything into `./artifacts` alongside `wfreerdp.exe` and its runtime DLLs.
 
+### Authenticode signing
+
+Unsigned, low-prevalence remote-administration binaries are more likely to receive reputation-based antivirus warnings. After building, sign every staged EXE/DLL with a trusted Code Signing certificate:
+
+```powershell
+# Set WINDOWS_SIGNING_CERTIFICATE_PASSWORD from your secret manager first.
+./scripts/sign-artifacts.ps1 -CertificatePath C:\secure\agent-rdp-signing.pfx
+Remove-Item Env:\WINDOWS_SIGNING_CERTIFICATE_PASSWORD
+```
+
+The signing script reads the password from the environment rather than a command-line parameter, uses SHA-256 plus RFC 3161 timestamping, bounds each SignTool invocation and its post-timeout termination, verifies the signer thumbprint and timestamp, and makes best-effort cleanup of every expected imported certificate and private key even after a partial import failure. Certificate-store access is serialized with a per-user named mutex, and the script refuses to import a PFX whose certificates overlap `Cert:\CurrentUser\My`, preventing concurrent script runs or pre-existing certificate/key associations from being mutated. The Windows CI smoke test signs temporary copies with an ephemeral self-signed certificate, verifies that the helper removed its imported certificate, and deliberately skips the external timestamp service to avoid a network-dependent hang; the uploaded seven-day CI artifact is explicitly named `agent-rdp-windows-build-unsigned` and remains unsigned. The release path does not use the test-only switch and remains timestamped.
+
+The release workflow enables the same step when both repository secrets are configured:
+
+- `WINDOWS_SIGNING_CERTIFICATE_BASE64` — base64 of the PFX file;
+- `WINDOWS_SIGNING_CERTIFICATE_PASSWORD` — the PFX password.
+
+Set both or neither. A partial configuration fails the release; with neither configured the workflow emits a prominent warning and produces an unsigned release so forks and development builds remain usable. For production distribution, configure a CA-issued certificate and allowlist its publisher/certificate in enterprise policy instead of excluding `\\tsclient\*` or disabling endpoint protection.
+
 > **Note:** FreeRDP's Windows client loads Dynamic Virtual Channel plugins from an addin search path whose exact layout can vary by FreeRDP version/build. `build.ps1` stages `agent-rdp-client.dll` next to `wfreerdp.exe` in `./artifacts`, which covers the common "same directory as the client" convention — if your `wfreerdp.exe` doesn't pick it up from there, check your build's addin directory and copy the DLL there too.
 
 ## Security / detection note
 
 Carried over from upstream: the server-side helper process, RDP-based command bridging, and remote process execution used here can resemble malware behavior to antivirus/EDR products, even though no files are persisted on the target. This tool is intended for legitimate administrative, testing, and research use against systems you're authorized to manage.
+
+This project does not attempt to hide that behavior or evade endpoint controls. It validates the RDP server certificate and respects the target's PowerShell execution policy by default, supports Authenticode signing for publisher reputation, and recommends narrow certificate-based enterprise policy. Signing can reduce false positives, but it does not make RDP-based remote execution invisible to EDR or guarantee that a security product will allow a command.
 
 ## Further reading
 
