@@ -47,6 +47,40 @@ function Write-SigningProgress {
     }
 }
 
+function Test-CodeSigningCertificate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CodeSigningOid
+    )
+
+    if (-not $Certificate.HasPrivateKey) {
+        return $false
+    }
+
+    $enhancedKeyUsageExtension = $null
+    foreach ($extension in $Certificate.Extensions) {
+        if ($extension.Oid -and $extension.Oid.Value -eq "2.5.29.37") {
+            $enhancedKeyUsageExtension = $extension
+            break
+        }
+    }
+    if (-not $enhancedKeyUsageExtension) {
+        return $false
+    }
+
+    $decodedEnhancedKeyUsage = [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new()
+    $decodedEnhancedKeyUsage.CopyFrom($enhancedKeyUsageExtension)
+    foreach ($usageOid in $decodedEnhancedKeyUsage.EnhancedKeyUsages) {
+        if ($usageOid.Value -eq $CodeSigningOid) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Find-SignTool {
     $command = Get-Command "signtool.exe" -ErrorAction SilentlyContinue
     if ($command) {
@@ -212,8 +246,7 @@ try {
     $codeSigningOid = "1.3.6.1.5.5.7.3.3"
     $signingCertificates = @(
         $importedCertificates | Where-Object {
-            $_.HasPrivateKey -and
-            ($_.EnhancedKeyUsageList | Where-Object { $_.ObjectId.Value -eq $codeSigningOid })
+            Test-CodeSigningCertificate -Certificate $_ -CodeSigningOid $codeSigningOid
         }
     )
     if ($signingCertificates.Count -ne 1) {

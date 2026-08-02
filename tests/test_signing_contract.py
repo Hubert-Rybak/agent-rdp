@@ -39,6 +39,10 @@ def test_signing_script_uses_sha256_rfc3161_and_environment_password():
     assert "$cleanupErrors" in source
     assert "function Write-SigningProgress" in source
     assert "::notice title=agent-rdp signing helper::" in source
+    assert "function Test-CodeSigningCertificate" in source
+    assert "EnhancedKeyUsageList" not in source
+    assert '"2.5.29.37"' in source
+    assert "$decodedEnhancedKeyUsage.EnhancedKeyUsages" in source
     assert "$importedCertificate.Dispose()" in source
     assert source.index("foreach ($importedCertificate in $importedCertificates)") < source.index(
         "foreach ($thumbprint in $expectedCertificateThumbprints)"
