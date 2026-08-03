@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-rdp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Windows-to-Windows RDP command execution: run cmd/PowerShell on a remote Windows target over RDP, with no extra port and no writes to the target's disk."
 readme = "README.md"
 requires-python = ">=3.10"
