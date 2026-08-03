@@ -108,53 +108,6 @@ jobs:
         run: |
           pyinstaller --onefile --name agent-rdp --distpath artifacts --workpath build/pyinstaller --specpath build src/launcher/agent_rdp.py
 
-      - name: Prepare Authenticode signing certificate
-        id: signing
-        shell: pwsh
-        env:
-          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
-          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
-        run: |
-          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_BASE64)
-          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD)
-          if ($hasCertificate -xor $hasPassword) {
-            throw "Authenticode signing is only partially configured; set both signing secrets or neither"
-          }
-          if (-not $hasCertificate) {
-            Write-Host "::warning::Authenticode signing is not configured. Release PE files will be unsigned."
-            "configured=false" >> $env:GITHUB_OUTPUT
-            exit 0
-          }
-
-          $certificatePath = Join-Path $env:RUNNER_TEMP "agent-rdp-signing.pfx"
-          try {
-            $certificateBytes = [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERTIFICATE_BASE64)
-            [IO.File]::WriteAllBytes($certificatePath, $certificateBytes)
-          } catch {
-            throw "WINDOWS_SIGNING_CERTIFICATE_BASE64 is not valid base64: $($_.Exception.Message)"
-          }
-          "configured=true" >> $env:GITHUB_OUTPUT
-          "certificate_path=$certificatePath" >> $env:GITHUB_OUTPUT
-
-      - name: Sign Windows artifacts
-        if: steps.signing.outputs.configured == 'true'
-        timeout-minutes: 10
-        shell: pwsh
-        env:
-          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
-          CERTIFICATE_PATH: ${{ steps.signing.outputs.certificate_path }}
-        run: |
-          ./scripts/sign-artifacts.ps1 -CertificatePath $env:CERTIFICATE_PATH -ArtifactsDirectory "artifacts"
-
-      - name: Remove temporary signing certificate
-        if: always()
-        shell: pwsh
-        run: |
-          $certificatePath = Join-Path $env:RUNNER_TEMP "agent-rdp-signing.pfx"
-          if (Test-Path $certificatePath) {
-            Remove-Item -Path $certificatePath -Force
-          }
-
       - name: Package release zip
         id: package
         shell: pwsh
