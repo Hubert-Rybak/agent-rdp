@@ -76,88 +76,10 @@ jobs:
         shell: pwsh
         run: ./scripts/build.ps1
 
-      - name: Smoke-test Authenticode signing helper
-        timeout-minutes: 5
-        shell: pwsh
-        run: |
-          $temporaryDirectory = Join-Path $env:RUNNER_TEMP "agent-rdp-signing-smoke"
-          $pfxPath = Join-Path $temporaryDirectory "smoke.pfx"
-          $artifactCopy = Join-Path $temporaryDirectory "artifacts"
-          $rsa = $null
-          $certificate = $null
-          $thumbprint = $null
-          $passwordText = [Guid]::NewGuid().ToString("N")
-          New-Item -ItemType Directory -Path $artifactCopy -Force | Out-Null
-
-          try {
-            Write-Host "::notice title=agent-rdp signing smoke::Generating in-memory signing certificate"
-            $rsa = [System.Security.Cryptography.RSA]::Create(2048)
-            $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
-              "CN=agent-rdp CI signing smoke",
-              $rsa,
-              [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-              [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
-            )
-            $ekuOids = [System.Security.Cryptography.OidCollection]::new()
-            [void]$ekuOids.Add([System.Security.Cryptography.Oid]::new("1.3.6.1.5.5.7.3.3"))
-            [void]$request.CertificateExtensions.Add(
-              [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($ekuOids, $false)
-            )
-            [void]$request.CertificateExtensions.Add(
-              [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new(
-                [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature,
-                $true
-              )
-            )
-            $certificate = $request.CreateSelfSigned(
-              [DateTimeOffset]::UtcNow.AddMinutes(-5),
-              [DateTimeOffset]::UtcNow.AddDays(1)
-            )
-            $thumbprint = $certificate.Thumbprint
-            [System.IO.File]::WriteAllBytes(
-              $pfxPath,
-              $certificate.Export(
-                [System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,
-                $passwordText
-              )
-            )
-            $certificate.Dispose()
-            $certificate = $null
-            $rsa.Dispose()
-            $rsa = $null
-            Write-Host "::notice title=agent-rdp signing smoke::Exported ephemeral PFX without a source store entry"
-
-            Copy-Item artifacts/agent-rdp-bridge.exe, artifacts/agent-rdp-client.dll -Destination $artifactCopy
-            $env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD = $passwordText
-            Write-Host "::notice title=agent-rdp signing smoke::Invoking bounded signing helper"
-            ./scripts/sign-artifacts.ps1 `
-              -CertificatePath $pfxPath `
-              -ArtifactsDirectory $artifactCopy `
-              -SkipTimestamp `
-              -SignToolTimeoutSeconds 60
-            Write-Host "::notice title=agent-rdp signing smoke::Signing helper completed"
-
-            $importedCertificatePath = "Cert:\CurrentUser\My\$thumbprint"
-            if (Test-Path $importedCertificatePath) {
-              throw "Signing helper left its imported certificate in CurrentUser\\My"
-            }
-          }
-          finally {
-            Remove-Item Env:\WINDOWS_SIGNING_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue
-            $passwordText = $null
-            if ($certificate) { $certificate.Dispose() }
-            if ($rsa) { $rsa.Dispose() }
-            $myCertificatePath = "Cert:\CurrentUser\My\$thumbprint"
-            if (Test-Path $myCertificatePath) {
-              Remove-Item -Path $myCertificatePath -DeleteKey -Force
-            }
-            if (Test-Path $temporaryDirectory) { Remove-Item -Path $temporaryDirectory -Recurse -Force }
-          }
-
       - name: Upload build artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: agent-rdp-windows-build-unsigned
+          name: agent-rdp-windows-build
           path: artifacts/
           retention-days: 7
           if-no-files-found: error

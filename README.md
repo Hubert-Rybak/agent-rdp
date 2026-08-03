@@ -320,32 +320,13 @@ Prerequisites:
 
 This bootstraps vcpkg, installs FreeRDP (`client` feature) via `vcpkg.json` using the repository's `x64-windows-agent-rdp` triplet (which enables the native Windows client disabled by vcpkg's standard port), builds `agent-rdp-client.dll` and `agent-rdp-bridge.exe` via `CMakeLists.txt`, and stages everything into `./artifacts` alongside `wfreerdp.exe` and its runtime DLLs.
 
-### Authenticode signing
-
-Unsigned, low-prevalence remote-administration binaries are more likely to receive reputation-based antivirus warnings. After building, sign every staged EXE/DLL with a trusted Code Signing certificate:
-
-```powershell
-# Set WINDOWS_SIGNING_CERTIFICATE_PASSWORD from your secret manager first.
-./scripts/sign-artifacts.ps1 -CertificatePath C:\secure\agent-rdp-signing.pfx
-Remove-Item Env:\WINDOWS_SIGNING_CERTIFICATE_PASSWORD
-```
-
-The signing script reads the password from the environment rather than a command-line parameter, uses SHA-256 plus RFC 3161 timestamping, bounds each SignTool invocation and its post-timeout termination, verifies the signer thumbprint and timestamp, and makes best-effort cleanup of every expected imported certificate and private key even after a partial import failure. Certificate-store access is serialized with a per-user named mutex, and the script refuses to import a PFX whose certificates overlap `Cert:\CurrentUser\My`, preventing concurrent script runs or pre-existing certificate/key associations from being mutated. The Windows CI smoke test signs temporary copies with an ephemeral self-signed certificate, verifies that the helper removed its imported certificate, and deliberately skips the external timestamp service to avoid a network-dependent hang; the uploaded seven-day CI artifact is explicitly named `agent-rdp-windows-build-unsigned` and remains unsigned. The release path does not use the test-only switch and remains timestamped.
-
-The release workflow enables the same step when both repository secrets are configured:
-
-- `WINDOWS_SIGNING_CERTIFICATE_BASE64` — base64 of the PFX file;
-- `WINDOWS_SIGNING_CERTIFICATE_PASSWORD` — the PFX password.
-
-Set both or neither. A partial configuration fails the release; with neither configured the workflow emits a prominent warning and produces an unsigned release so forks and development builds remain usable. For production distribution, configure a CA-issued certificate and allowlist its publisher/certificate in enterprise policy instead of excluding `\\tsclient\*` or disabling endpoint protection.
-
 > **Note:** FreeRDP's Windows client loads Dynamic Virtual Channel plugins from an addin search path whose exact layout can vary by FreeRDP version/build. `build.ps1` stages `agent-rdp-client.dll` next to `wfreerdp.exe` in `./artifacts`, which covers the common "same directory as the client" convention — if your `wfreerdp.exe` doesn't pick it up from there, check your build's addin directory and copy the DLL there too.
 
 ## Security / detection note
 
 Carried over from upstream: the server-side helper process, RDP-based command bridging, and remote process execution used here can resemble malware behavior to antivirus/EDR products, even though no files are persisted on the target. This tool is intended for legitimate administrative, testing, and research use against systems you're authorized to manage.
 
-This project does not attempt to hide that behavior or evade endpoint controls. It validates the RDP server certificate and respects the target's PowerShell execution policy by default, supports Authenticode signing for publisher reputation, and recommends narrow certificate-based enterprise policy. Signing can reduce false positives, but it does not make RDP-based remote execution invisible to EDR or guarantee that a security product will allow a command.
+This project does not attempt to hide that behavior or evade endpoint controls. It validates the RDP server certificate and respects the target's PowerShell execution policy by default. Where an organization needs an endpoint-policy exception, use a narrowly scoped rule for the exact reviewed build rather than broad path exclusions or disabling endpoint protection. RDP-based remote execution remains visible to EDR, and no release mechanism can guarantee that a security product will allow a command.
 
 ## Further reading
 
